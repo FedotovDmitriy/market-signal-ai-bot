@@ -1,0 +1,25 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "market-signal-ai-bot",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-06-02",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  "vars": {
+    "ENVIRONMENT": "production",
+    "PUBLIC_APP_NAME": "Market Signal AI",
+    "DEFAULT_LOCALE": "en",
+    "DEFAULT_COUNTRY": "US"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "market-signal-ai-bot-db",
+      "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+      "migrations_dir": "migrations"
+    }
+  ]
+}

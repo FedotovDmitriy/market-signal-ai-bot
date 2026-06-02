@@ -1,0 +1,18 @@
+{
+  "name": "market-signal-ai-bot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --local --port 8787",
+    "deploy": "wrangler deploy",
+    "check": "tsc --noEmit",
+    "db:apply:local": "wrangler d1 migrations apply market-signal-ai-bot-db --local",
+    "db:apply:remote": "wrangler d1 migrations apply market-signal-ai-bot-db --remote"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260530.0",
+    "typescript": "^5.8.3",
+    "wrangler": "^4.19.1"
+  }
+}
