@@ -50,11 +50,11 @@ const COUNTRIES = [
 
 const LANGUAGES = [
   ["en", "English"],
-  ["ka", "ქართული"],
-  ["ru", "Русский"],
+  ["ka", "Georgian"],
+  ["ru", "Russian"],
   ["de", "Deutsch"],
-  ["fr", "Français"],
-  ["es", "Español"]
+  ["fr", "Francais"],
+  ["es", "Spanish"]
 ];
 
 export default {
@@ -605,7 +605,7 @@ async function load() {
     metric("Events 24h", summary.events24h)
   ].join("");
   users.innerHTML = renderUsers(userData.users);
-  events.innerHTML = eventData.events.map((event) => '<div class="event"><strong>' + event.event_type + '</strong><br>' + event.actor + ' · ' + event.created_at + '</div>').join("");
+  events.innerHTML = eventData.events.map((event) => '<div class="event"><strong>' + event.event_type + '</strong><br>' + event.actor + ' - ' + event.created_at + '</div>').join("");
 }
 
 function metric(label, value) {

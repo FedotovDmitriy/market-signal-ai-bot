@@ -18,7 +18,7 @@
     {
       "binding": "DB",
       "database_name": "market-signal-ai-bot-db",
-      "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+      "database_id": "ebc41219-4276-4068-adb4-1a78d0f0192f",
       "migrations_dir": "migrations"
     }
   ]
