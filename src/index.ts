@@ -554,14 +554,14 @@ async function sha256(value: string): Promise<string> {
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-async function hmacBytes(key: string | ArrayBuffer | Uint8Array, value: string): Promise<ArrayBuffer> {
+async function hmacBytes(key: string | ArrayBuffer, value: string): Promise<ArrayBuffer> {
   const encoder = new TextEncoder();
   const keyBytes = typeof key === "string" ? encoder.encode(key) : key;
   const cryptoKey = await crypto.subtle.importKey("raw", keyBytes, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
   return crypto.subtle.sign("HMAC", cryptoKey, encoder.encode(value));
 }
 
-async function hmacHex(key: string | ArrayBuffer | Uint8Array, value: string): Promise<string> {
+async function hmacHex(key: string | ArrayBuffer, value: string): Promise<string> {
   const signature = await hmacBytes(key, value);
   return [...new Uint8Array(signature)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
