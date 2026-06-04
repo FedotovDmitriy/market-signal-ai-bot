@@ -2,7 +2,7 @@
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "market-signal-ai-bot",
   "main": "src/index.ts",
-  "compatibility_date": "2026-06-02",
+  "compatibility_date": "2026-06-04",
   "compatibility_flags": ["nodejs_compat"],
   "observability": {
     "enabled": true,
@@ -12,7 +12,8 @@
     "ENVIRONMENT": "production",
     "PUBLIC_APP_NAME": "Market Signal AI",
     "DEFAULT_LOCALE": "en",
-    "DEFAULT_COUNTRY": "US"
+    "DEFAULT_COUNTRY": "US",
+    "ALLOW_UNVERIFIED_TELEGRAM": "false"
   },
   "d1_databases": [
     {

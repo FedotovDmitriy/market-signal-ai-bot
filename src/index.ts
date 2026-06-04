@@ -7,6 +7,7 @@ interface Env {
   ADMIN_TOKEN?: string;
   TELEGRAM_BOT_TOKEN?: string;
   SUBSCRIPTION_WEBHOOK_SECRET?: string;
+  ALLOW_UNVERIFIED_TELEGRAM?: string;
 }
 
 type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
@@ -37,6 +38,14 @@ type SubscriptionInput = {
   metadata?: Record<string, JsonValue>;
 };
 
+type TelegramWebAppUser = {
+  id: number;
+  first_name?: string;
+  last_name?: string;
+  username?: string;
+  language_code?: string;
+};
+
 const COUNTRIES = [
   ["US", "United States"],
   ["GB", "United Kingdom"],
@@ -45,7 +54,8 @@ const COUNTRIES = [
   ["FR", "France"],
   ["IT", "Italy"],
   ["ES", "Spain"],
-  ["AE", "United Arab Emirates"]
+  ["AE", "United Arab Emirates"],
+  ["IL", "Israel"]
 ];
 
 const LANGUAGES = [
@@ -54,7 +64,8 @@ const LANGUAGES = [
   ["ru", "Russian"],
   ["de", "Deutsch"],
   ["fr", "Francais"],
-  ["es", "Spanish"]
+  ["es", "Spanish"],
+  ["he", "Hebrew"]
 ];
 
 export default {
@@ -118,6 +129,30 @@ export default {
         return withCors(await adminEvents(env));
       }
 
+      if (url.pathname === "/api/admin/bot-routes" && request.method === "GET") {
+        const guard = await requireAdmin(request, env);
+        if (guard) return withCors(guard);
+        return withCors(await adminBotRoutes(env));
+      }
+
+      if (url.pathname === "/api/admin/bot-routes" && request.method === "PUT") {
+        const guard = await requireAdmin(request, env);
+        if (guard) return withCors(guard);
+        return withCors(await upsertBotRoute(request, env, ctx));
+      }
+
+      if (url.pathname === "/api/admin/news-sources" && request.method === "GET") {
+        const guard = await requireAdmin(request, env);
+        if (guard) return withCors(guard);
+        return withCors(await adminNewsSources(env));
+      }
+
+      if (url.pathname === "/api/admin/news-sources" && request.method === "PUT") {
+        const guard = await requireAdmin(request, env);
+        if (guard) return withCors(guard);
+        return withCors(await upsertNewsSource(request, env, ctx));
+      }
+
       return json({ error: "not_found" }, 404);
     } catch (error) {
       console.error(JSON.stringify({ level: "error", message: "request_failed", path: url.pathname, error: String(error) }));
@@ -128,10 +163,20 @@ export default {
 
 async function registerUser(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const body = await readJson<Record<string, unknown>>(request);
-  const telegramUserId = cleanString(body.telegramUserId);
+  const initData = cleanString(body.initData);
+  const telegramUser = initData ? await verifyTelegramInitData(initData, env) : null;
+  if (initData && !telegramUser) return json({ error: "invalid_telegram_init_data" }, 401);
+
+  const submittedTelegramUserId = cleanString(body.telegramUserId);
+  if (submittedTelegramUserId && !telegramUser && env.ALLOW_UNVERIFIED_TELEGRAM !== "true") {
+    return json({ error: "telegram_init_data_required" }, 401);
+  }
+
+  const telegramUserId = telegramUser ? String(telegramUser.id) : submittedTelegramUserId;
   const email = cleanString(body.email)?.toLowerCase() ?? null;
-  const displayName = cleanString(body.displayName) ?? null;
-  const language = cleanLanguage(body.language, env.DEFAULT_LOCALE);
+  const telegramName = telegramUser ? [telegramUser.first_name, telegramUser.last_name].filter(Boolean).join(" ") : null;
+  const displayName = cleanString(body.displayName) ?? telegramName ?? null;
+  const language = cleanLanguage(body.language, telegramUser?.language_code ?? env.DEFAULT_LOCALE);
   const country = cleanCountry(body.country, env.DEFAULT_COUNTRY);
 
   if (!telegramUserId && !email) {
@@ -210,10 +255,11 @@ async function updateSettings(request: Request, env: Env, ctx: ExecutionContext)
 }
 
 async function acceptSubscription(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-  const guard = await requireWebhookSecret(request, env);
+  const rawBody = await request.text();
+  const guard = await requireWebhookSignature(request, env, rawBody);
   if (guard) return guard;
 
-  const body = await readJson<SubscriptionInput>(request);
+  const body = parseJson<SubscriptionInput>(rawBody);
   const provider = cleanString(body.provider) ?? "external";
   const plan = cleanString(body.plan) ?? "trial";
   const status = cleanEnum(body.status, ["trialing", "active", "past_due", "canceled", "expired"], "active");
@@ -242,32 +288,55 @@ async function acceptSubscription(request: Request, env: Env, ctx: ExecutionCont
 }
 
 async function adminOverview(env: Env): Promise<Response> {
-  const [users, activeSubscriptions, events, countries] = await Promise.all([
+  const [users, activeSubscriptions, events, countries, botRoutes, newsSources] = await Promise.all([
     env.DB.prepare("SELECT COUNT(*) AS count FROM users").first<{ count: number }>(),
     env.DB.prepare("SELECT COUNT(*) AS count FROM subscriptions WHERE status IN ('trialing', 'active')").first<{ count: number }>(),
     env.DB.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE created_at >= datetime('now', '-24 hours')").first<{ count: number }>(),
-    env.DB.prepare("SELECT country, COUNT(*) AS count FROM users GROUP BY country ORDER BY count DESC LIMIT 10").all()
+    env.DB.prepare("SELECT country, COUNT(*) AS count FROM users GROUP BY country ORDER BY count DESC LIMIT 10").all(),
+    env.DB.prepare("SELECT COUNT(*) AS count FROM bot_routes WHERE is_active = 1").first<{ count: number }>(),
+    env.DB.prepare("SELECT COUNT(*) AS count FROM news_sources WHERE is_active = 1").first<{ count: number }>()
   ]);
 
   return json({
     users: users?.count ?? 0,
     activeSubscriptions: activeSubscriptions?.count ?? 0,
     events24h: events?.count ?? 0,
+    activeBotRoutes: botRoutes?.count ?? 0,
+    activeNewsSources: newsSources?.count ?? 0,
     countries: countries.results
   });
 }
 
 async function adminUsers(env: Env, url: URL): Promise<Response> {
   const limit = Math.min(Number(url.searchParams.get("limit") ?? 50), 100);
+  const country = cleanString(url.searchParams.get("country"))?.toUpperCase();
+  const status = cleanString(url.searchParams.get("status"));
+  const search = cleanString(url.searchParams.get("search"));
+  const filters: string[] = [];
+  const params: string[] = [];
+  if (country) {
+    filters.push("u.country = ?");
+    params.push(country);
+  }
+  if (status) {
+    filters.push("u.status = ?");
+    params.push(status);
+  }
+  if (search) {
+    filters.push("(u.email LIKE ? OR u.telegram_user_id LIKE ? OR u.display_name LIKE ?)");
+    params.push(`%${search}%`, `%${search}%`, `%${search}%`);
+  }
+  const where = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
   const result = await env.DB.prepare(
     `SELECT u.*, s.plan, s.status AS subscription_status, s.current_period_end
      FROM users u
      LEFT JOIN subscriptions s ON s.id = (
        SELECT id FROM subscriptions WHERE user_id = u.id ORDER BY created_at DESC LIMIT 1
      )
+     ${where}
      ORDER BY u.created_at DESC
      LIMIT ?`
-  ).bind(limit).all();
+  ).bind(...params, limit).all();
 
   return json({ users: result.results });
 }
@@ -281,6 +350,85 @@ async function adminEvents(env: Env): Promise<Response> {
   ).all();
 
   return json({ events: result.results });
+}
+
+async function adminBotRoutes(env: Env): Promise<Response> {
+  const result = await env.DB.prepare(
+    `SELECT country, language, bot_url, is_active, created_at, updated_at
+     FROM bot_routes
+     ORDER BY country ASC`
+  ).all();
+
+  return json({ routes: result.results });
+}
+
+async function upsertBotRoute(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const body = await readJson<Record<string, unknown>>(request);
+  const country = cleanCountry(body.country, env.DEFAULT_COUNTRY);
+  const language = cleanLanguage(body.language, env.DEFAULT_LOCALE);
+  const botUrl = cleanString(body.botUrl);
+  const isActive = body.isActive === false ? 0 : 1;
+  if (!botUrl || !/^https:\/\/t\.me\/[a-zA-Z0-9_]+$/.test(botUrl)) {
+    return json({ error: "valid_t_me_bot_url_required" }, 400);
+  }
+
+  await env.DB.prepare(
+    `INSERT INTO bot_routes (country, language, bot_url, is_active, updated_at)
+     VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+     ON CONFLICT(country) DO UPDATE SET
+       language = excluded.language,
+       bot_url = excluded.bot_url,
+       is_active = excluded.is_active,
+       updated_at = CURRENT_TIMESTAMP`
+  ).bind(country, language, botUrl, isActive).run();
+
+  ctx.waitUntil(audit(env, null, "admin", "bot_route.upserted", request, { country, language, botUrl, isActive }));
+
+  return json({ country, language, botUrl, isActive: Boolean(isActive) });
+}
+
+async function adminNewsSources(env: Env): Promise<Response> {
+  const result = await env.DB.prepare(
+    `SELECT id, country, language, source_type, name, handle_or_url, is_active, notes, updated_at
+     FROM news_sources
+     ORDER BY country ASC, name ASC`
+  ).all();
+
+  return json({ sources: result.results });
+}
+
+async function upsertNewsSource(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const body = await readJson<Record<string, unknown>>(request);
+  const country = cleanCountry(body.country, "IL");
+  const language = cleanLanguage(body.language, "he");
+  const sourceType = cleanEnum(body.sourceType, ["telegram", "rss", "website"], "telegram");
+  const name = cleanString(body.name);
+  const handleOrUrl = cleanString(body.handleOrUrl);
+  const notes = cleanString(body.notes);
+  const isActive = body.isActive === false ? 0 : 1;
+  if (!name || !handleOrUrl) return json({ error: "name_and_handle_or_url_required" }, 400);
+  if (sourceType === "telegram" && !/^https:\/\/t\.me\/[a-zA-Z0-9_]+$/.test(handleOrUrl)) {
+    return json({ error: "valid_t_me_source_required" }, 400);
+  }
+
+  const id = cleanString(body.id) ?? `${country.toLowerCase()}-${name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`;
+  await env.DB.prepare(
+    `INSERT INTO news_sources (id, country, language, source_type, name, handle_or_url, is_active, notes, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+     ON CONFLICT(id) DO UPDATE SET
+       country = excluded.country,
+       language = excluded.language,
+       source_type = excluded.source_type,
+       name = excluded.name,
+       handle_or_url = excluded.handle_or_url,
+       is_active = excluded.is_active,
+       notes = excluded.notes,
+       updated_at = CURRENT_TIMESTAMP`
+  ).bind(id, country, language, sourceType, name, handleOrUrl, isActive, notes).run();
+
+  ctx.waitUntil(audit(env, null, "admin", "news_source.upserted", request, { id, country, language, sourceType, name, handleOrUrl, isActive }));
+
+  return json({ id, country, language, sourceType, name, handleOrUrl, isActive: Boolean(isActive), notes });
 }
 
 async function findUser(env: Env, input: { telegramUserId?: string | null; email?: string | null }): Promise<AppUser | null> {
@@ -327,6 +475,53 @@ async function requireWebhookSecret(request: Request, env: Env): Promise<Respons
   return null;
 }
 
+async function requireWebhookSignature(request: Request, env: Env, rawBody: string): Promise<Response | null> {
+  if (!env.SUBSCRIPTION_WEBHOOK_SECRET) return json({ error: "webhook_secret_not_configured" }, 503);
+  const timestamp = request.headers.get("X-Timestamp") ?? request.headers.get("X-Market-Signal-Timestamp");
+  const signature = request.headers.get("X-Signature") ?? request.headers.get("X-Market-Signal-Signature");
+  if (!timestamp || !signature) return json({ error: "webhook_signature_required" }, 401);
+
+  const timestampMs = Number(timestamp) * 1000;
+  if (!Number.isFinite(timestampMs) || Math.abs(Date.now() - timestampMs) > 5 * 60 * 1000) {
+    return json({ error: "webhook_timestamp_expired" }, 401);
+  }
+
+  const expected = await hmacHex(env.SUBSCRIPTION_WEBHOOK_SECRET, `${timestamp}.${rawBody}`);
+  const normalizedSignature = signature.startsWith("sha256=") ? signature.slice("sha256=".length) : signature;
+  if (!(await timingSafeEqual(normalizedSignature, expected))) return json({ error: "unauthorized" }, 401);
+
+  return null;
+}
+
+async function verifyTelegramInitData(initData: string, env: Env): Promise<TelegramWebAppUser | null> {
+  if (!env.TELEGRAM_BOT_TOKEN) return null;
+
+  const params = new URLSearchParams(initData);
+  const hash = params.get("hash");
+  if (!hash) return null;
+  params.delete("hash");
+
+  const authDate = Number(params.get("auth_date") ?? "0");
+  if (!Number.isFinite(authDate) || Math.abs(Date.now() / 1000 - authDate) > 24 * 60 * 60) return null;
+
+  const dataCheckString = [...params.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => `${key}=${value}`)
+    .join("\n");
+  const secretKey = await hmacBytes("WebAppData", env.TELEGRAM_BOT_TOKEN);
+  const expectedHash = await hmacHex(secretKey, dataCheckString);
+  if (!(await timingSafeEqual(hash, expectedHash))) return null;
+
+  const userJson = params.get("user");
+  if (!userJson) return null;
+  try {
+    const user = JSON.parse(userJson) as TelegramWebAppUser;
+    return typeof user.id === "number" ? user : null;
+  } catch {
+    return null;
+  }
+}
+
 function bearerToken(request: Request): string | null {
   const header = request.headers.get("Authorization");
   if (!header?.startsWith("Bearer ")) return null;
@@ -359,10 +554,26 @@ async function sha256(value: string): Promise<string> {
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
+async function hmacBytes(key: string | ArrayBuffer | Uint8Array, value: string): Promise<ArrayBuffer> {
+  const encoder = new TextEncoder();
+  const keyBytes = typeof key === "string" ? encoder.encode(key) : key;
+  const cryptoKey = await crypto.subtle.importKey("raw", keyBytes, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  return crypto.subtle.sign("HMAC", cryptoKey, encoder.encode(value));
+}
+
+async function hmacHex(key: string | ArrayBuffer | Uint8Array, value: string): Promise<string> {
+  const signature = await hmacBytes(key, value);
+  return [...new Uint8Array(signature)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
 async function readJson<T>(request: Request): Promise<T> {
   const contentType = request.headers.get("Content-Type") ?? "";
   if (!contentType.includes("application/json")) throw new Error("Expected JSON request");
   return request.json() as Promise<T>;
+}
+
+function parseJson<T>(rawBody: string): T {
+  return JSON.parse(rawBody) as T;
 }
 
 function cleanString(value: unknown): string | null {
@@ -405,7 +616,7 @@ function withCors(response: Response): Response {
   const headers = new Headers(response.headers);
   headers.set("Access-Control-Allow-Origin", "*");
   headers.set("Access-Control-Allow-Methods", "GET,POST,PUT,OPTIONS");
-  headers.set("Access-Control-Allow-Headers", "Content-Type,Authorization,X-Webhook-Secret");
+  headers.set("Access-Control-Allow-Headers", "Content-Type,Authorization,X-Webhook-Secret,X-Timestamp,X-Signature,X-Market-Signal-Timestamp,X-Market-Signal-Signature");
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
@@ -479,7 +690,40 @@ function renderAdminApp(env: Env): string {
     <section id="overview" class="metrics"></section>
     <section class="panel">
       <h2>Users</h2>
+      <form id="filtersForm" class="filters-row">
+        <input name="search" placeholder="Search email, Telegram ID, name">
+        <input name="country" placeholder="Country">
+        <select name="status">
+          <option value="">Any status</option>
+          <option value="active">Active</option>
+          <option value="blocked">Blocked</option>
+        </select>
+        <button type="submit">Filter</button>
+      </form>
       <div id="users" class="table"></div>
+    </section>
+    <section class="panel">
+      <h2>Bot routes</h2>
+      <form id="routeForm" class="route-row">
+        <input name="country" placeholder="IL">
+        <input name="language" placeholder="he">
+        <input name="botUrl" placeholder="https://t.me/your_israel_bot">
+        <label class="inline-check"><input name="isActive" type="checkbox" checked> Active</label>
+        <button type="submit">Save</button>
+      </form>
+      <div id="routes" class="table"></div>
+    </section>
+    <section class="panel">
+      <h2>News sources</h2>
+      <form id="sourceForm" class="source-row">
+        <input name="name" placeholder="Calcalist">
+        <input name="country" placeholder="IL">
+        <input name="language" placeholder="he">
+        <input name="handleOrUrl" placeholder="https://t.me/source">
+        <label class="inline-check"><input name="isActive" type="checkbox" checked> Active</label>
+        <button type="submit">Save</button>
+      </form>
+      <div id="sources" class="table"></div>
     </section>
     <section class="panel">
       <h2>Events</h2>
@@ -511,7 +755,12 @@ button:hover { background: #115e59; }
 .result { margin-top: 14px; }
 .result a { color: #0f766e; font-weight: 800; }
 .auth-row { grid-template-columns: minmax(0, 1fr) auto; margin-bottom: 18px; }
-.metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-bottom: 18px; }
+.filters-row { grid-template-columns: minmax(180px, 1fr) 110px 150px auto; margin-bottom: 14px; }
+.route-row { grid-template-columns: 80px 90px minmax(220px, 1fr) 110px auto; margin-bottom: 14px; }
+.source-row { grid-template-columns: minmax(140px, 1fr) 80px 90px minmax(220px, 1fr) 110px auto; margin-bottom: 14px; }
+.inline-check { display: flex; align-items: center; gap: 8px; min-height: 44px; }
+.inline-check input { width: 16px; min-height: 16px; }
+.metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 18px; }
 .metric { background: #fff; border: 1px solid #dfe7e9; border-radius: 8px; padding: 16px; }
 .metric strong { display: block; font-size: 28px; }
 .table { overflow-x: auto; }
@@ -520,7 +769,7 @@ th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid #e7edef; 
 th { color: #607077; font-size: 12px; }
 .events { display: grid; gap: 8px; font-size: 13px; }
 .event { border-bottom: 1px solid #e7edef; padding: 8px 0; }
-@media (max-width: 720px) { .metrics { grid-template-columns: 1fr; } .auth-row { grid-template-columns: 1fr; } }
+@media (max-width: 860px) { .metrics, .auth-row, .filters-row, .route-row, .source-row { grid-template-columns: 1fr; } }
 `;
 }
 
@@ -545,7 +794,7 @@ async function boot() {
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
   const data = Object.fromEntries(new FormData(form).entries());
-  data.telegramUserId = telegramUser?.id ? String(telegramUser.id) : "";
+  data.initData = tg?.initData || "";
   if (!data.displayName && telegramUser) data.displayName = [telegramUser.first_name, telegramUser.last_name].filter(Boolean).join(" ");
 
   const response = await fetch("/api/register", {
@@ -574,9 +823,14 @@ boot().catch(() => {
 function adminAppScript(): string {
   return `
 const authForm = document.querySelector("#authForm");
+const filtersForm = document.querySelector("#filtersForm");
+const routeForm = document.querySelector("#routeForm");
+const sourceForm = document.querySelector("#sourceForm");
 const overview = document.querySelector("#overview");
 const users = document.querySelector("#users");
 const events = document.querySelector("#events");
+const routes = document.querySelector("#routes");
+const sources = document.querySelector("#sources");
 let token = sessionStorage.getItem("adminToken") || "";
 if (token) load();
 
@@ -587,24 +841,67 @@ authForm.addEventListener("submit", (event) => {
   load();
 });
 
-async function api(path) {
-  const response = await fetch(path, { headers: { Authorization: "Bearer " + token } });
+filtersForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  load();
+});
+
+routeForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const data = Object.fromEntries(new FormData(routeForm).entries());
+  data.isActive = routeForm.elements.isActive.checked;
+  await api("/api/admin/bot-routes", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data)
+  });
+  routeForm.reset();
+  routeForm.elements.isActive.checked = true;
+  load();
+});
+
+sourceForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const data = Object.fromEntries(new FormData(sourceForm).entries());
+  data.isActive = sourceForm.elements.isActive.checked;
+  await api("/api/admin/news-sources", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data)
+  });
+  sourceForm.reset();
+  sourceForm.elements.country.value = "IL";
+  sourceForm.elements.language.value = "he";
+  sourceForm.elements.isActive.checked = true;
+  load();
+});
+
+async function api(path, options = {}) {
+  const headers = { Authorization: "Bearer " + token, ...(options.headers || {}) };
+  const response = await fetch(path, { ...options, headers });
   if (!response.ok) throw new Error("Unauthorized");
   return response.json();
 }
 
 async function load() {
-  const [summary, userData, eventData] = await Promise.all([
+  const query = new URLSearchParams(new FormData(filtersForm)).toString();
+  const [summary, userData, eventData, routeData, sourceData] = await Promise.all([
     api("/api/admin/overview"),
-    api("/api/admin/users"),
-    api("/api/admin/events")
+    api("/api/admin/users?" + query),
+    api("/api/admin/events"),
+    api("/api/admin/bot-routes"),
+    api("/api/admin/news-sources")
   ]);
   overview.innerHTML = [
     metric("Users", summary.users),
     metric("Active subscriptions", summary.activeSubscriptions),
-    metric("Events 24h", summary.events24h)
+    metric("Events 24h", summary.events24h),
+    metric("Active bot routes", summary.activeBotRoutes),
+    metric("Active news sources", summary.activeNewsSources)
   ].join("");
   users.innerHTML = renderUsers(userData.users);
+  routes.innerHTML = renderRoutes(routeData.routes);
+  sources.innerHTML = renderSources(sourceData.sources);
   events.innerHTML = eventData.events.map((event) => '<div class="event"><strong>' + event.event_type + '</strong><br>' + event.actor + ' - ' + event.created_at + '</div>').join("");
 }
 
@@ -615,6 +912,18 @@ function metric(label, value) {
 function renderUsers(rows) {
   return '<table><thead><tr><th>User</th><th>Country</th><th>Language</th><th>Status</th><th>Subscription</th><th>Created</th></tr></thead><tbody>' +
     rows.map((row) => '<tr><td>' + (row.email || row.telegram_user_id || row.id) + '</td><td>' + row.country + '</td><td>' + row.language + '</td><td>' + row.status + '</td><td>' + (row.subscription_status || "none") + '</td><td>' + row.created_at + '</td></tr>').join("") +
+    '</tbody></table>';
+}
+
+function renderRoutes(rows) {
+  return '<table><thead><tr><th>Country</th><th>Language</th><th>Bot URL</th><th>Active</th><th>Updated</th></tr></thead><tbody>' +
+    rows.map((row) => '<tr><td>' + row.country + '</td><td>' + row.language + '</td><td><a href="' + row.bot_url + '">' + row.bot_url + '</a></td><td>' + (row.is_active ? "yes" : "no") + '</td><td>' + row.updated_at + '</td></tr>').join("") +
+    '</tbody></table>';
+}
+
+function renderSources(rows) {
+  return '<table><thead><tr><th>Name</th><th>Country</th><th>Language</th><th>Type</th><th>URL</th><th>Active</th><th>Updated</th></tr></thead><tbody>' +
+    rows.map((row) => '<tr><td>' + row.name + '</td><td>' + row.country + '</td><td>' + row.language + '</td><td>' + row.source_type + '</td><td><a href="' + row.handle_or_url + '">' + row.handle_or_url + '</a></td><td>' + (row.is_active ? "yes" : "no") + '</td><td>' + row.updated_at + '</td></tr>').join("") +
     '</tbody></table>';
 }
 `;

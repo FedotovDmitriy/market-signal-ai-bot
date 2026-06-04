@@ -35,6 +35,13 @@ npx wrangler secret put SUBSCRIPTION_WEBHOOK_SECRET
 npx wrangler secret put TELEGRAM_BOT_TOKEN
 ```
 
+`ADMIN_TOKEN` is the private password for `/admin` and `/api/admin/*`. Rotate it with:
+
+```powershell
+npx wrangler secret put ADMIN_TOKEN
+npm run deploy
+```
+
 Deploy:
 
 ```powershell
@@ -54,12 +61,19 @@ npm run deploy
 
 ## Subscription Intake
 
-Send subscription events with the shared secret:
+Send subscription events with an HMAC signature. The signature payload is:
+
+```text
+<unix_timestamp_seconds>.<raw_json_body>
+```
+
+Sign it with `SUBSCRIPTION_WEBHOOK_SECRET` using HMAC-SHA256 and send:
 
 ```http
 POST /api/subscriptions
 Content-Type: application/json
-X-Webhook-Secret: <SUBSCRIPTION_WEBHOOK_SECRET>
+X-Timestamp: <unix_timestamp_seconds>
+X-Signature: sha256=<hex_hmac_sha256>
 ```
 
 ```json
@@ -76,6 +90,20 @@ X-Webhook-Secret: <SUBSCRIPTION_WEBHOOK_SECRET>
 ## Admin Access
 
 Open `/admin`, enter `ADMIN_TOKEN`, and the dashboard will load users, subscriptions, and recent audit events.
+
+The admin dashboard also manages country bot routes and approved news sources for the upstream news pipeline.
+
+## GitHub Auto Deploy
+
+The workflow in `.github/workflows/deploy.yml` deploys on every push to `main`.
+
+Add this GitHub Actions secret:
+
+```text
+CLOUDFLARE_API_TOKEN
+```
+
+The token needs Cloudflare Workers Scripts write and D1 write permissions for the target account.
 
 ## Next Steps
 
