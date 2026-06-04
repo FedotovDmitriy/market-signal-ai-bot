@@ -303,6 +303,7 @@ async function adminOverview(env: Env): Promise<Response> {
     events24h: events?.count ?? 0,
     activeBotRoutes: botRoutes?.count ?? 0,
     activeNewsSources: newsSources?.count ?? 0,
+    serverTime: new Date().toISOString(),
     countries: countries.results
   });
 }
@@ -687,6 +688,7 @@ function renderAdminApp(env: Env): string {
       <input name="token" type="password" autocomplete="current-password" placeholder="Admin token">
       <button type="submit">Open</button>
     </form>
+    <section id="refreshInfo" class="time-strip"></section>
     <section id="overview" class="metrics"></section>
     <section class="panel">
       <h2>Users</h2>
@@ -755,6 +757,8 @@ button:hover { background: #115e59; }
 .result { margin-top: 14px; }
 .result a { color: #0f766e; font-weight: 800; }
 .auth-row { grid-template-columns: minmax(0, 1fr) auto; margin-bottom: 18px; }
+.time-strip { display: flex; flex-wrap: wrap; gap: 10px 18px; margin: 0 0 18px; color: #607077; font-size: 13px; }
+.time-strip strong { color: #172026; }
 .filters-row { grid-template-columns: minmax(180px, 1fr) 110px 150px auto; margin-bottom: 14px; }
 .route-row { grid-template-columns: 80px 90px minmax(220px, 1fr) 110px auto; margin-bottom: 14px; }
 .source-row { grid-template-columns: minmax(140px, 1fr) 80px 90px minmax(220px, 1fr) 110px auto; margin-bottom: 14px; }
@@ -826,6 +830,7 @@ const authForm = document.querySelector("#authForm");
 const filtersForm = document.querySelector("#filtersForm");
 const routeForm = document.querySelector("#routeForm");
 const sourceForm = document.querySelector("#sourceForm");
+const refreshInfo = document.querySelector("#refreshInfo");
 const overview = document.querySelector("#overview");
 const users = document.querySelector("#users");
 const events = document.querySelector("#events");
@@ -897,8 +902,10 @@ async function load() {
     metric("Active subscriptions", summary.activeSubscriptions),
     metric("Events 24h", summary.events24h),
     metric("Active bot routes", summary.activeBotRoutes),
-    metric("Active news sources", summary.activeNewsSources)
+    metric("Active news sources", summary.activeNewsSources),
+    metric("Server time", formatTime(summary.serverTime))
   ].join("");
+  refreshInfo.innerHTML = '<span><strong>Server:</strong> ' + formatTime(summary.serverTime) + '</span><span><strong>Local:</strong> ' + formatTime(new Date().toISOString()) + '</span><span><strong>Refreshed:</strong> ' + new Date().toLocaleString() + '</span>';
   users.innerHTML = renderUsers(userData.users);
   routes.innerHTML = renderRoutes(routeData.routes);
   sources.innerHTML = renderSources(sourceData.sources);
@@ -907,6 +914,10 @@ async function load() {
 
 function metric(label, value) {
   return '<div class="metric"><strong>' + value + '</strong><span>' + label + '</span></div>';
+}
+
+function formatTime(value) {
+  return new Date(value).toLocaleString();
 }
 
 function renderUsers(rows) {
