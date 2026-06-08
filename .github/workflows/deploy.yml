@@ -30,6 +30,15 @@ jobs:
       - name: Type check
         run: npm run check
 
+      - name: Show Cloudflare context
+        run: |
+          if [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "CLOUDFLARE_ACCOUNT_ID repository variable is missing or empty."
+            exit 1
+          fi
+          echo "Using Cloudflare account: $CLOUDFLARE_ACCOUNT_ID"
+          npm exec wrangler -- whoami
+
       - name: Apply D1 migrations
         run: npm exec wrangler -- d1 migrations apply market-signal-ai-bot-db --remote
 
