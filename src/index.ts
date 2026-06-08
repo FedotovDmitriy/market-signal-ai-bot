@@ -8,6 +8,7 @@ interface Env {
   TELEGRAM_BOT_TOKEN?: string;
   SUBSCRIPTION_WEBHOOK_SECRET?: string;
   ALLOW_UNVERIFIED_TELEGRAM?: string;
+  SUBSCRIPTION_CHECKOUT_URL?: string;
 }
 
 type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
@@ -30,6 +31,9 @@ type SubscriptionInput = {
   userId?: string;
   telegramUserId?: string;
   email?: string;
+  displayName?: string;
+  language?: string;
+  country?: string;
   provider?: string;
   externalId?: string;
   plan?: string;
@@ -45,6 +49,8 @@ type TelegramWebAppUser = {
   username?: string;
   language_code?: string;
 };
+
+const ACTIVE_SUBSCRIPTION_STATUSES = ["trialing", "active"] as const;
 
 const COUNTRIES = [
   ["US", "United States"],
@@ -94,6 +100,7 @@ export default {
           appName: env.PUBLIC_APP_NAME,
           defaultLocale: env.DEFAULT_LOCALE,
           defaultCountry: env.DEFAULT_COUNTRY,
+          subscriptionCheckoutUrl: env.SUBSCRIPTION_CHECKOUT_URL ?? null,
           countries: COUNTRIES.map(([code, name]) => ({ code, name })),
           languages: LANGUAGES.map(([code, name]) => ({ code, name }))
         });
@@ -186,6 +193,7 @@ async function registerUser(request: Request, env: Env, ctx: ExecutionContext): 
   const existing = await findUser(env, { telegramUserId, email });
   const userId = existing?.id ?? crypto.randomUUID();
   const botUrl = await findBotUrl(env, country);
+  const access = await resolveAccess(env, userId, botUrl);
 
   if (existing) {
     await env.DB.prepare(
@@ -214,7 +222,7 @@ async function registerUser(request: Request, env: Env, ctx: ExecutionContext): 
 
   ctx.waitUntil(audit(env, userId, "user", "user.registered", request, { country, language }));
 
-  return json({ userId, botUrl, status: "active" });
+  return json({ userId, botUrl: access.allowed ? botUrl : null, lockedBotUrl: access.allowed ? null : botUrl, access, status: "active" });
 }
 
 async function updateSettings(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -230,6 +238,7 @@ async function updateSettings(request: Request, env: Env, ctx: ExecutionContext)
     ? body.tickers.map((ticker) => cleanString(ticker)?.toUpperCase()).filter(isString).slice(0, 50)
     : [];
   const botUrl = await findBotUrl(env, country);
+  const access = await resolveAccess(env, userId, botUrl);
 
   await env.DB.prepare(
     `INSERT INTO user_settings (user_id, language, country, risk_profile, delivery_mode, tickers_json)
@@ -251,7 +260,7 @@ async function updateSettings(request: Request, env: Env, ctx: ExecutionContext)
 
   ctx.waitUntil(audit(env, userId, "user", "settings.updated", request, { country, language, riskProfile, deliveryMode }));
 
-  return json({ userId, botUrl, settings: { language, country, riskProfile, deliveryMode, tickers } });
+  return json({ userId, botUrl: access.allowed ? botUrl : null, lockedBotUrl: access.allowed ? null : botUrl, access, settings: { language, country, riskProfile, deliveryMode, tickers } });
 }
 
 async function acceptSubscription(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -274,7 +283,24 @@ async function acceptSubscription(request: Request, env: Env, ctx: ExecutionCont
     });
     userId = existing?.id;
   }
-  if (!userId) return json({ error: "known_user_required" }, 400);
+  if (!userId) {
+    const telegramUserId = cleanString(body.telegramUserId);
+    const email = cleanString(body.email)?.toLowerCase() ?? null;
+    if (!telegramUserId && !email) return json({ error: "userId_telegramUserId_or_email_required" }, 400);
+    userId = crypto.randomUUID();
+    const language = cleanLanguage(body.language, env.DEFAULT_LOCALE);
+    const country = cleanCountry(body.country, env.DEFAULT_COUNTRY);
+    const botUrl = await findBotUrl(env, country);
+    await env.DB.prepare(
+      `INSERT INTO users (id, telegram_user_id, email, display_name, language, country, selected_bot_url, last_seen_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`
+    ).bind(userId, telegramUserId, email, cleanString(body.displayName), language, country, botUrl).run();
+    await env.DB.prepare(
+      `INSERT INTO user_settings (user_id, language, country)
+       VALUES (?, ?, ?)
+       ON CONFLICT(user_id) DO UPDATE SET language = excluded.language, country = excluded.country, updated_at = CURRENT_TIMESTAMP`
+    ).bind(userId, language, country).run();
+  }
 
   const subscriptionId = crypto.randomUUID();
   await env.DB.prepare(
@@ -284,7 +310,12 @@ async function acceptSubscription(request: Request, env: Env, ctx: ExecutionCont
 
   ctx.waitUntil(audit(env, userId, provider, "subscription.received", request, { plan, status, externalId }));
 
-  return json({ subscriptionId, userId, status });
+  const user = await findUserById(env, userId);
+  const country = user?.country ?? env.DEFAULT_COUNTRY;
+  const botUrl = await findBotUrl(env, country);
+  const access = await resolveAccess(env, userId, botUrl);
+
+  return json({ subscriptionId, userId, status, botUrl: access.allowed ? botUrl : null, access });
 }
 
 async function adminOverview(env: Env): Promise<Response> {
@@ -444,9 +475,30 @@ async function findUser(env: Env, input: { telegramUserId?: string | null; email
   return null;
 }
 
+async function findUserById(env: Env, userId: string): Promise<AppUser | null> {
+  return env.DB.prepare("SELECT * FROM users WHERE id = ?").bind(userId).first<AppUser>();
+}
+
 async function findBotUrl(env: Env, country: string): Promise<string | null> {
   const route = await env.DB.prepare("SELECT bot_url FROM bot_routes WHERE country = ? AND is_active = 1").bind(country).first<{ bot_url: string }>();
   return route?.bot_url ?? null;
+}
+
+async function hasActiveSubscription(env: Env, userId: string): Promise<boolean> {
+  const row = await env.DB.prepare(
+    `SELECT id FROM subscriptions
+     WHERE user_id = ? AND status IN (${ACTIVE_SUBSCRIPTION_STATUSES.map(() => "?").join(",")})
+     ORDER BY created_at DESC
+     LIMIT 1`
+  ).bind(userId, ...ACTIVE_SUBSCRIPTION_STATUSES).first<{ id: string }>();
+  return Boolean(row);
+}
+
+async function resolveAccess(env: Env, userId: string, botUrl: string | null): Promise<{ allowed: boolean; reason: string | null; subscriptionRequired: boolean }> {
+  if (!botUrl) return { allowed: false, reason: "country_bot_not_configured", subscriptionRequired: true };
+  const subscribed = await hasActiveSubscription(env, userId);
+  if (!subscribed) return { allowed: false, reason: "active_subscription_required", subscriptionRequired: true };
+  return { allowed: true, reason: null, subscriptionRequired: true };
 }
 
 async function audit(env: Env, userId: string | null, actor: string, eventType: string, request: Request, payload: Record<string, JsonValue>): Promise<void> {
@@ -756,6 +808,7 @@ button { min-height: 44px; border: 0; border-radius: 6px; padding: 0 16px; font:
 button:hover { background: #115e59; }
 .result { margin-top: 14px; }
 .result a { color: #0f766e; font-weight: 800; }
+.button-link { display: inline-flex; align-items: center; min-height: 42px; margin-top: 4px; border-radius: 6px; padding: 0 14px; color: #fff !important; background: #0f766e; text-decoration: none; }
 .auth-row { grid-template-columns: minmax(0, 1fr) auto; margin-bottom: 18px; }
 .time-strip { display: flex; flex-wrap: wrap; gap: 10px 18px; margin: 0 0 18px; color: #607077; font-size: 13px; }
 .time-strip strong { color: #172026; }
@@ -786,9 +839,11 @@ const result = document.querySelector("#result");
 const language = document.querySelector("#language");
 const country = document.querySelector("#country");
 const telegramUser = tg?.initDataUnsafe?.user;
+let appConfig = null;
 
 async function boot() {
   const config = await fetch("/api/config").then((response) => response.json());
+  appConfig = config;
   language.innerHTML = config.languages.map((item) => '<option value="' + item.code + '">' + item.name + '</option>').join("");
   country.innerHTML = config.countries.map((item) => '<option value="' + item.code + '">' + item.name + '</option>').join("");
   language.value = config.defaultLocale.toLowerCase();
@@ -813,9 +868,29 @@ form.addEventListener("submit", async (event) => {
     return;
   }
   result.innerHTML = payload.botUrl
-    ? '<strong>Account is ready.</strong><p>Your country bot: <a href="' + payload.botUrl + '">' + payload.botUrl + '</a></p>'
-    : '<strong>Account is ready.</strong><p>No bot route is active for this country yet.</p>';
+    ? '<strong>Access is ready.</strong><p>Your country bot: <a href="' + escapeText(payload.botUrl) + '">' + escapeText(payload.botUrl) + '</a></p>'
+    : renderLockedAccess(payload);
 });
+
+function renderLockedAccess(payload) {
+  if (payload.access?.reason === "country_bot_not_configured") {
+    return '<strong>Account is ready.</strong><p>The country bot is not active yet. You will see the link here after it is configured.</p>';
+  }
+  const checkoutUrl = appConfig?.subscriptionCheckoutUrl;
+  const checkout = checkoutUrl
+    ? '<p><a class="button-link" href="' + escapeText(appendCheckoutParam(checkoutUrl, payload.userId)) + '">Create subscription</a></p>'
+    : '';
+  return '<strong>Account is ready.</strong><p>Create or activate a subscription to unlock your country bot.</p>' + checkout;
+}
+
+function appendCheckoutParam(checkoutUrl, userId) {
+  const separator = checkoutUrl.includes("?") ? "&" : "?";
+  return checkoutUrl + separator + "userId=" + encodeURIComponent(userId);
+}
+
+function escapeText(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
+}
 
 boot().catch(() => {
   result.hidden = false;
@@ -922,20 +997,24 @@ function formatTime(value) {
 
 function renderUsers(rows) {
   return '<table><thead><tr><th>User</th><th>Country</th><th>Language</th><th>Status</th><th>Subscription</th><th>Created</th></tr></thead><tbody>' +
-    rows.map((row) => '<tr><td>' + (row.email || row.telegram_user_id || row.id) + '</td><td>' + row.country + '</td><td>' + row.language + '</td><td>' + row.status + '</td><td>' + (row.subscription_status || "none") + '</td><td>' + row.created_at + '</td></tr>').join("") +
+    rows.map((row) => '<tr><td>' + escapeText(row.email || row.telegram_user_id || row.id) + '</td><td>' + escapeText(row.country) + '</td><td>' + escapeText(row.language) + '</td><td>' + escapeText(row.status) + '</td><td>' + escapeText(row.subscription_status || "none") + '</td><td>' + escapeText(row.created_at) + '</td></tr>').join("") +
     '</tbody></table>';
 }
 
 function renderRoutes(rows) {
   return '<table><thead><tr><th>Country</th><th>Language</th><th>Bot URL</th><th>Active</th><th>Updated</th></tr></thead><tbody>' +
-    rows.map((row) => '<tr><td>' + row.country + '</td><td>' + row.language + '</td><td><a href="' + row.bot_url + '">' + row.bot_url + '</a></td><td>' + (row.is_active ? "yes" : "no") + '</td><td>' + row.updated_at + '</td></tr>').join("") +
+    rows.map((row) => '<tr><td>' + escapeText(row.country) + '</td><td>' + escapeText(row.language) + '</td><td><a href="' + escapeText(row.bot_url) + '">' + escapeText(row.bot_url) + '</a></td><td>' + (row.is_active ? "yes" : "no") + '</td><td>' + escapeText(row.updated_at) + '</td></tr>').join("") +
     '</tbody></table>';
 }
 
 function renderSources(rows) {
   return '<table><thead><tr><th>Name</th><th>Country</th><th>Language</th><th>Type</th><th>URL</th><th>Active</th><th>Updated</th></tr></thead><tbody>' +
-    rows.map((row) => '<tr><td>' + row.name + '</td><td>' + row.country + '</td><td>' + row.language + '</td><td>' + row.source_type + '</td><td><a href="' + row.handle_or_url + '">' + row.handle_or_url + '</a></td><td>' + (row.is_active ? "yes" : "no") + '</td><td>' + row.updated_at + '</td></tr>').join("") +
+    rows.map((row) => '<tr><td>' + escapeText(row.name) + '</td><td>' + escapeText(row.country) + '</td><td>' + escapeText(row.language) + '</td><td>' + escapeText(row.source_type) + '</td><td><a href="' + escapeText(row.handle_or_url) + '">' + escapeText(row.handle_or_url) + '</a></td><td>' + (row.is_active ? "yes" : "no") + '</td><td>' + escapeText(row.updated_at) + '</td></tr>').join("") +
     '</tbody></table>';
+}
+
+function escapeText(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
 }
 `;
 }

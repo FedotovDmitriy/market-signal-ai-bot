@@ -7,7 +7,7 @@ Cloudflare Worker service for Telegram WebApp onboarding, user settings, subscri
 - Registers Telegram WebApp users or website users.
 - Stores country, language, risk profile, preferred tickers, and delivery settings.
 - Accepts subscription events from a website, payment provider, or another trusted source.
-- Returns the Telegram bot link for the selected country.
+- Returns the Telegram bot link for the selected country only after an active or trialing subscription exists.
 - Provides a private admin dashboard at `/admin`.
 - Writes audit events for account, settings, and subscription activity.
 
@@ -34,6 +34,14 @@ npx wrangler secret put ADMIN_TOKEN
 npx wrangler secret put SUBSCRIPTION_WEBHOOK_SECRET
 npx wrangler secret put TELEGRAM_BOT_TOKEN
 ```
+
+Optional public checkout URL in `wrangler.jsonc`:
+
+```jsonc
+"SUBSCRIPTION_CHECKOUT_URL": "https://your-site.example/checkout"
+```
+
+When this value is configured, the Telegram WebApp can send a newly registered user to your subscription checkout with `userId` appended to the URL.
 
 `ADMIN_TOKEN` is the private password for `/admin` and `/api/admin/*`. Rotate it with:
 
@@ -79,6 +87,9 @@ X-Signature: sha256=<hex_hmac_sha256>
 ```json
 {
   "email": "user@example.com",
+  "displayName": "User Name",
+  "language": "en",
+  "country": "US",
   "provider": "website",
   "externalId": "sub_123",
   "plan": "pro",
@@ -86,6 +97,10 @@ X-Signature: sha256=<hex_hmac_sha256>
   "currentPeriodEnd": "2026-07-02T00:00:00Z"
 }
 ```
+
+If `userId` is not provided, the service looks up the user by Telegram ID or email. If no user exists yet and the payload includes email or Telegram ID, the service creates a user with the provided country/language or the defaults from `wrangler.jsonc`.
+
+The response includes `botUrl` only when the subscription status is `trialing` or `active` and the selected country has an active bot route.
 
 ## Admin Access
 
