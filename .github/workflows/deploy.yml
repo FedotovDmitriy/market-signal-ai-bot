@@ -38,6 +38,7 @@ jobs:
           fi
           echo "Using Cloudflare account: $CLOUDFLARE_ACCOUNT_ID"
           npm exec wrangler -- whoami
+          npm exec wrangler -- d1 list || true
 
       - name: Apply D1 migrations
         run: npm exec wrangler -- d1 migrations apply market-signal-ai-bot-db --remote
