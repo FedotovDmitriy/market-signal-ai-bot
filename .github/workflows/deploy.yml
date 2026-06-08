@@ -31,7 +31,7 @@ jobs:
         run: npm run check
 
       - name: Apply D1 migrations
-        run: npm exec wrangler -- d1 migrations apply market-signal-ai-bot-db --remote --yes
+        run: npm exec wrangler -- d1 migrations apply market-signal-ai-bot-db --remote
 
       - name: Deploy Worker
         run: npm exec wrangler -- deploy
