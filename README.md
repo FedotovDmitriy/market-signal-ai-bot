@@ -118,7 +118,13 @@ Add this GitHub Actions secret:
 CLOUDFLARE_API_TOKEN
 ```
 
-The token needs Cloudflare Workers Scripts write and D1 write permissions for the target account.
+Add this GitHub Actions repository variable:
+
+```text
+CLOUDFLARE_ACCOUNT_ID
+```
+
+The token needs Cloudflare Workers Scripts write and D1 write permissions for this exact account. The D1 `database_id` in `wrangler.jsonc` must also belong to the same account.
 
 ## Next Steps
 
