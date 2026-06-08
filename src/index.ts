@@ -92,7 +92,7 @@ export default {
       }
 
       if (url.pathname === "/api/health" && request.method === "GET") {
-        return json({ ok: true, service: env.PUBLIC_APP_NAME, environment: env.ENVIRONMENT });
+        return json({ ok: true, service: env.PUBLIC_APP_NAME, environment: env.ENVIRONMENT, deployCheck: "2026-06-08-subscription-gate" });
       }
 
       if (url.pathname === "/api/config" && request.method === "GET") {
