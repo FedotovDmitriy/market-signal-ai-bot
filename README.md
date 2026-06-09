@@ -5,9 +5,10 @@ Cloudflare Worker service for Telegram WebApp onboarding, user settings, subscri
 ## What This Service Does
 
 - Registers Telegram WebApp users or website users.
-- Stores country, language, risk profile, preferred tickers, and delivery settings.
+- Stores language, email, risk profile, preferred tickers, delivery settings, and one or more selected news countries.
 - Accepts subscription events from a website, payment provider, or another trusted source.
-- Returns the Telegram bot link for the selected country only after an active or trialing subscription exists.
+- Returns Telegram chat links for the selected news countries.
+- Lets a returning user remove country/chat bindings from their account.
 - Provides a private admin dashboard at `/admin`.
 - Writes audit events for account, settings, and subscription activity.
 
@@ -90,6 +91,8 @@ In BotFather, also set the bot domain to the deployed Worker host if Telegram as
 - `/admin` private monitoring dashboard.
 - `/api/register` create or update user.
 - `/api/settings` update user settings.
+- `/api/account` get account details and linked country chats.
+- `/api/account/countries` remove a linked country chat.
 - `/api/subscriptions` receive external subscription event.
 - `/api/telegram/webhook` receive Telegram bot updates.
 - `/api/admin/telegram/setup` configure Telegram webhook, commands, and Web App menu button.

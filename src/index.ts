@@ -35,6 +35,7 @@ type SubscriptionInput = {
   displayName?: string;
   language?: string;
   country?: string;
+  countries?: string[];
   provider?: string;
   externalId?: string;
   plan?: string;
@@ -60,6 +61,12 @@ type TelegramUpdate = {
   };
 };
 
+type CountryLink = {
+  country: string;
+  botUrl: string | null;
+  isActive: boolean;
+};
+
 const ACTIVE_SUBSCRIPTION_STATUSES = ["trialing", "active"] as const;
 
 const COUNTRIES = [
@@ -76,11 +83,7 @@ const COUNTRIES = [
 
 const LANGUAGES = [
   ["en", "English"],
-  ["ka", "Georgian"],
   ["ru", "Russian"],
-  ["de", "Deutsch"],
-  ["fr", "Francais"],
-  ["es", "Spanish"],
   ["he", "Hebrew"]
 ];
 
@@ -122,6 +125,14 @@ export default {
 
       if (url.pathname === "/api/settings" && request.method === "PUT") {
         return withCors(await updateSettings(request, env, ctx));
+      }
+
+      if (url.pathname === "/api/account" && request.method === "GET") {
+        return withCors(await accountDetails(url, env));
+      }
+
+      if (url.pathname === "/api/account/countries" && request.method === "DELETE") {
+        return withCors(await deleteCountryLink(request, env, ctx));
       }
 
       if (url.pathname === "/api/subscriptions" && request.method === "POST") {
@@ -201,10 +212,12 @@ async function registerUser(request: Request, env: Env, ctx: ExecutionContext): 
 
   const telegramUserId = telegramUser ? String(telegramUser.id) : submittedTelegramUserId;
   const email = cleanString(body.email)?.toLowerCase() ?? null;
+  if (email && !isValidEmail(email)) return json({ error: "valid_email_required" }, 400);
   const telegramName = telegramUser ? [telegramUser.first_name, telegramUser.last_name].filter(Boolean).join(" ") : null;
   const displayName = cleanString(body.displayName) ?? telegramName ?? null;
   const language = cleanLanguage(body.language, telegramUser?.language_code ?? env.DEFAULT_LOCALE);
-  const country = cleanCountry(body.country, env.DEFAULT_COUNTRY);
+  const countries = cleanCountries(body.countries, body.country, env.DEFAULT_COUNTRY);
+  const country = countries[0];
 
   if (!telegramUserId && !email) {
     return json({ error: "telegramUserId_or_email_required" }, 400);
@@ -212,8 +225,9 @@ async function registerUser(request: Request, env: Env, ctx: ExecutionContext): 
 
   const existing = await findUser(env, { telegramUserId, email });
   const userId = existing?.id ?? crypto.randomUUID();
-  const botUrl = await findBotUrl(env, country);
-  const access = await resolveAccess(env, userId, botUrl);
+  const countryLinks = await buildCountryLinks(env, countries);
+  const primaryBotUrl = countryLinks[0]?.botUrl ?? null;
+  const access = await resolveAccess(env, userId, primaryBotUrl);
 
   if (existing) {
     await env.DB.prepare(
@@ -226,12 +240,12 @@ async function registerUser(request: Request, env: Env, ctx: ExecutionContext): 
            updated_at = CURRENT_TIMESTAMP,
            last_seen_at = CURRENT_TIMESTAMP
        WHERE id = ?`
-    ).bind(email, displayName, language, country, botUrl, userId).run();
+    ).bind(email, displayName, language, country, primaryBotUrl, userId).run();
   } else {
     await env.DB.prepare(
       `INSERT INTO users (id, telegram_user_id, email, display_name, language, country, selected_bot_url, last_seen_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`
-    ).bind(userId, telegramUserId, email, displayName, language, country, botUrl).run();
+    ).bind(userId, telegramUserId, email, displayName, language, country, primaryBotUrl).run();
   }
 
   await env.DB.prepare(
@@ -240,9 +254,11 @@ async function registerUser(request: Request, env: Env, ctx: ExecutionContext): 
      ON CONFLICT(user_id) DO UPDATE SET language = excluded.language, country = excluded.country, updated_at = CURRENT_TIMESTAMP`
   ).bind(userId, language, country).run();
 
-  ctx.waitUntil(audit(env, userId, "user", "user.registered", request, { country, language }));
+  await replaceCountryLinks(env, userId, countryLinks);
 
-  return json({ userId, botUrl: access.allowed ? botUrl : null, lockedBotUrl: access.allowed ? null : botUrl, access, status: "active" });
+  ctx.waitUntil(audit(env, userId, "user", "user.registered", request, { countries, language }));
+
+  return json({ userId, botUrl: primaryBotUrl, countryLinks, access, status: "active" });
 }
 
 async function updateSettings(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -251,14 +267,16 @@ async function updateSettings(request: Request, env: Env, ctx: ExecutionContext)
   if (!userId) return json({ error: "userId_required" }, 400);
 
   const language = cleanLanguage(body.language, env.DEFAULT_LOCALE);
-  const country = cleanCountry(body.country, env.DEFAULT_COUNTRY);
+  const countries = cleanCountries(body.countries, body.country, env.DEFAULT_COUNTRY);
+  const country = countries[0];
   const riskProfile = cleanEnum(body.riskProfile, ["conservative", "balanced", "aggressive"], "balanced");
   const deliveryMode = cleanEnum(body.deliveryMode, ["telegram", "email", "both"], "telegram");
   const tickers = Array.isArray(body.tickers)
     ? body.tickers.map((ticker) => cleanString(ticker)?.toUpperCase()).filter(isString).slice(0, 50)
     : [];
-  const botUrl = await findBotUrl(env, country);
-  const access = await resolveAccess(env, userId, botUrl);
+  const countryLinks = await buildCountryLinks(env, countries);
+  const primaryBotUrl = countryLinks[0]?.botUrl ?? null;
+  const access = await resolveAccess(env, userId, primaryBotUrl);
 
   await env.DB.prepare(
     `INSERT INTO user_settings (user_id, language, country, risk_profile, delivery_mode, tickers_json)
@@ -276,11 +294,13 @@ async function updateSettings(request: Request, env: Env, ctx: ExecutionContext)
     `UPDATE users
      SET language = ?, country = ?, selected_bot_url = ?, updated_at = CURRENT_TIMESTAMP, last_seen_at = CURRENT_TIMESTAMP
      WHERE id = ?`
-  ).bind(language, country, botUrl, userId).run();
+  ).bind(language, country, primaryBotUrl, userId).run();
 
-  ctx.waitUntil(audit(env, userId, "user", "settings.updated", request, { country, language, riskProfile, deliveryMode }));
+  await replaceCountryLinks(env, userId, countryLinks);
 
-  return json({ userId, botUrl: access.allowed ? botUrl : null, lockedBotUrl: access.allowed ? null : botUrl, access, settings: { language, country, riskProfile, deliveryMode, tickers } });
+  ctx.waitUntil(audit(env, userId, "user", "settings.updated", request, { countries, language, riskProfile, deliveryMode }));
+
+  return json({ userId, botUrl: primaryBotUrl, countryLinks, access, settings: { language, countries, riskProfile, deliveryMode, tickers } });
 }
 
 async function acceptSubscription(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -306,11 +326,14 @@ async function acceptSubscription(request: Request, env: Env, ctx: ExecutionCont
   if (!userId) {
     const telegramUserId = cleanString(body.telegramUserId);
     const email = cleanString(body.email)?.toLowerCase() ?? null;
+    if (email && !isValidEmail(email)) return json({ error: "valid_email_required" }, 400);
     if (!telegramUserId && !email) return json({ error: "userId_telegramUserId_or_email_required" }, 400);
     userId = crypto.randomUUID();
     const language = cleanLanguage(body.language, env.DEFAULT_LOCALE);
-    const country = cleanCountry(body.country, env.DEFAULT_COUNTRY);
-    const botUrl = await findBotUrl(env, country);
+    const countries = cleanCountries(body.countries, body.country, env.DEFAULT_COUNTRY);
+    const country = countries[0];
+    const countryLinks = await buildCountryLinks(env, countries);
+    const botUrl = countryLinks[0]?.botUrl ?? null;
     await env.DB.prepare(
       `INSERT INTO users (id, telegram_user_id, email, display_name, language, country, selected_bot_url, last_seen_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`
@@ -320,6 +343,7 @@ async function acceptSubscription(request: Request, env: Env, ctx: ExecutionCont
        VALUES (?, ?, ?)
        ON CONFLICT(user_id) DO UPDATE SET language = excluded.language, country = excluded.country, updated_at = CURRENT_TIMESTAMP`
     ).bind(userId, language, country).run();
+    await replaceCountryLinks(env, userId, countryLinks);
   }
 
   const subscriptionId = crypto.randomUUID();
@@ -331,11 +355,50 @@ async function acceptSubscription(request: Request, env: Env, ctx: ExecutionCont
   ctx.waitUntil(audit(env, userId, provider, "subscription.received", request, { plan, status, externalId }));
 
   const user = await findUserById(env, userId);
-  const country = user?.country ?? env.DEFAULT_COUNTRY;
-  const botUrl = await findBotUrl(env, country);
+  const countryLinks = await listCountryLinks(env, userId);
+  const country = countryLinks[0]?.country ?? user?.country ?? env.DEFAULT_COUNTRY;
+  const botUrl = countryLinks[0]?.botUrl ?? await findBotUrl(env, country);
   const access = await resolveAccess(env, userId, botUrl);
 
-  return json({ subscriptionId, userId, status, botUrl: access.allowed ? botUrl : null, access });
+  return json({ subscriptionId, userId, status, botUrl, countryLinks, access });
+}
+
+async function accountDetails(url: URL, env: Env): Promise<Response> {
+  const userId = cleanString(url.searchParams.get("userId"));
+  const email = cleanString(url.searchParams.get("email"))?.toLowerCase() ?? null;
+  if (email && !isValidEmail(email)) return json({ error: "valid_email_required" }, 400);
+  const user = userId ? await findUserById(env, userId) : await findUser(env, { email });
+  if (!user) return json({ error: "user_not_found" }, 404);
+  const countryLinks = await listCountryLinks(env, user.id);
+  return json({ user, countryLinks });
+}
+
+async function deleteCountryLink(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const body = await readJson<Record<string, unknown>>(request);
+  const userId = cleanString(body.userId);
+  const country = cleanCountry(body.country, "");
+  if (!userId) return json({ error: "userId_required" }, 400);
+  if (!country) return json({ error: "country_required" }, 400);
+
+  await env.DB.prepare(
+    `UPDATE user_country_links
+     SET is_active = 0, updated_at = CURRENT_TIMESTAMP
+     WHERE user_id = ? AND country = ?`
+  ).bind(userId, country).run();
+
+  const remaining = await listCountryLinks(env, userId);
+  const primary = remaining[0] ?? null;
+  await env.DB.prepare(
+    `UPDATE users
+     SET country = COALESCE(?, country),
+         selected_bot_url = ?,
+         updated_at = CURRENT_TIMESTAMP
+     WHERE id = ?`
+  ).bind(primary?.country ?? null, primary?.botUrl ?? null, userId).run();
+
+  ctx.waitUntil(audit(env, userId, "user", "country_link.deleted", request, { country }));
+
+  return json({ userId, removedCountry: country, countryLinks: remaining });
 }
 
 async function telegramWebhook(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -567,6 +630,38 @@ async function findBotUrl(env: Env, country: string): Promise<string | null> {
   return route?.bot_url ?? null;
 }
 
+async function buildCountryLinks(env: Env, countries: string[]): Promise<CountryLink[]> {
+  return Promise.all(countries.map(async (country) => ({
+    country,
+    botUrl: await findBotUrl(env, country),
+    isActive: true
+  })));
+}
+
+async function replaceCountryLinks(env: Env, userId: string, links: CountryLink[]): Promise<void> {
+  await env.DB.prepare("UPDATE user_country_links SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?").bind(userId).run();
+  for (const link of links) {
+    await env.DB.prepare(
+      `INSERT INTO user_country_links (user_id, country, bot_url, is_active, updated_at)
+       VALUES (?, ?, ?, 1, CURRENT_TIMESTAMP)
+       ON CONFLICT(user_id, country) DO UPDATE SET
+         bot_url = excluded.bot_url,
+         is_active = 1,
+         updated_at = CURRENT_TIMESTAMP`
+    ).bind(userId, link.country, link.botUrl).run();
+  }
+}
+
+async function listCountryLinks(env: Env, userId: string): Promise<CountryLink[]> {
+  const result = await env.DB.prepare(
+    `SELECT country, bot_url, is_active
+     FROM user_country_links
+     WHERE user_id = ? AND is_active = 1
+     ORDER BY created_at ASC`
+  ).bind(userId).all<{ country: string; bot_url: string | null; is_active: number }>();
+  return result.results.map((row) => ({ country: row.country, botUrl: row.bot_url, isActive: Boolean(row.is_active) }));
+}
+
 async function hasActiveSubscription(env: Env, userId: string): Promise<boolean> {
   const row = await env.DB.prepare(
     `SELECT id FROM subscriptions
@@ -761,10 +856,29 @@ function cleanCountry(value: unknown, fallback: string): string {
   return cleaned;
 }
 
+function cleanCountries(value: unknown, legacyCountry: unknown, fallback: string): string[] {
+  const rawValues = Array.isArray(value) ? value : [legacyCountry];
+  const countries = rawValues
+    .map((item) => cleanString(item)?.toUpperCase())
+    .filter((item): item is string => Boolean(item && /^[A-Z]{2}$/.test(item)));
+  const unique = [...new Set(countries)].slice(0, 10);
+  return unique.length ? unique : [fallback.toUpperCase()];
+}
+
 function cleanLanguage(value: unknown, fallback: string): string {
   const cleaned = cleanString(value)?.toLowerCase();
-  if (!cleaned || !/^[a-z]{2,8}$/.test(cleaned)) return fallback.toLowerCase();
+  const allowed = new Set(LANGUAGES.map(([code]) => code));
+  if (!cleaned || !/^[a-z]{2,8}$/.test(cleaned) || !allowed.has(cleaned)) return allowed.has(fallback.toLowerCase()) ? fallback.toLowerCase() : "en";
   return cleaned;
+}
+
+function isValidEmail(value: string): boolean {
+  if (value.length > 254) return false;
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(value)) return false;
+  const [local, domain] = value.split("@");
+  if (!local || !domain || local.length > 64) return false;
+  if (domain.includes("..")) return false;
+  return domain.split(".").every((part) => /^[a-z0-9-]+$/i.test(part) && !part.startsWith("-") && !part.endsWith("-"));
 }
 
 function cleanEnum<T extends string>(value: unknown, allowed: readonly T[], fallback: T): T {
@@ -788,7 +902,7 @@ function json(data: unknown, status = 200): Response {
 function withCors(response: Response): Response {
   const headers = new Headers(response.headers);
   headers.set("Access-Control-Allow-Origin", "*");
-  headers.set("Access-Control-Allow-Methods", "GET,POST,PUT,OPTIONS");
+  headers.set("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS");
   headers.set("Access-Control-Allow-Headers", "Content-Type,Authorization,X-Webhook-Secret,X-Timestamp,X-Signature,X-Market-Signal-Timestamp,X-Market-Signal-Signature");
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
@@ -824,12 +938,16 @@ function renderTelegramApp(env: Env): string {
       </div>
     </section>
     <form id="profileForm" class="panel">
-      <label>Name<input name="displayName" autocomplete="name" placeholder="Dmitriy"></label>
+      <label>Name<input name="displayName" autocomplete="name" placeholder="Your name"></label>
       <label>Email<input name="email" type="email" autocomplete="email" placeholder="you@example.com"></label>
       <label>Language<select name="language" id="language"></select></label>
-      <label>Country<select name="country" id="country"></select></label>
+      <fieldset>
+        <legend>News countries</legend>
+        <div id="countries" class="check-grid"></div>
+      </fieldset>
       <button type="submit">Create account</button>
     </form>
+    <section id="account" class="result" hidden></section>
     <section id="result" class="result" hidden></section>
   </main>
   <script>${telegramAppScript()}</script>
@@ -923,11 +1041,20 @@ p { margin: 4px 0 0; color: #607077; }
 form { display: grid; gap: 14px; }
 label { display: grid; gap: 6px; font-size: 13px; font-weight: 700; color: #34474f; }
 input, select { width: 100%; min-height: 44px; border: 1px solid #cad6da; border-radius: 6px; padding: 10px 12px; font: inherit; background: #fff; color: #172026; }
+fieldset { margin: 0; border: 1px solid #cad6da; border-radius: 6px; padding: 12px; }
+legend { padding: 0 4px; font-size: 13px; font-weight: 800; color: #34474f; }
 button { min-height: 44px; border: 0; border-radius: 6px; padding: 0 16px; font: inherit; font-weight: 800; color: #fff; background: #0f766e; cursor: pointer; }
 button:hover { background: #115e59; }
 .result { margin-top: 14px; }
 .result a { color: #0f766e; font-weight: 800; }
 .button-link { display: inline-flex; align-items: center; min-height: 42px; margin-top: 4px; border-radius: 6px; padding: 0 14px; color: #fff !important; background: #0f766e; text-decoration: none; }
+.check-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px; }
+.check-option { display: flex; align-items: center; gap: 8px; min-height: 36px; font-weight: 700; color: #172026; }
+.check-option input { width: 16px; min-height: 16px; }
+.link-list { display: grid; gap: 10px; margin-top: 12px; }
+.link-row { display: flex; justify-content: space-between; gap: 10px; align-items: center; padding: 10px; border: 1px solid #e7edef; border-radius: 6px; }
+.link-row button { min-height: 34px; padding: 0 10px; background: #7f1d1d; }
+.link-row button:hover { background: #991b1b; }
 .auth-row { grid-template-columns: minmax(0, 1fr) auto; margin-bottom: 18px; }
 .time-strip { display: flex; flex-wrap: wrap; gap: 10px 18px; margin: 0 0 18px; color: #607077; font-size: 13px; }
 .time-strip strong { color: #172026; }
@@ -955,25 +1082,40 @@ const tg = window.Telegram?.WebApp;
 tg?.ready();
 const form = document.querySelector("#profileForm");
 const result = document.querySelector("#result");
+const account = document.querySelector("#account");
 const language = document.querySelector("#language");
-const country = document.querySelector("#country");
+const countries = document.querySelector("#countries");
 const telegramUser = tg?.initDataUnsafe?.user;
 let appConfig = null;
+let currentUserId = localStorage.getItem("marketSignalUserId") || "";
 
 async function boot() {
   const config = await fetch("/api/config").then((response) => response.json());
   appConfig = config;
   language.innerHTML = config.languages.map((item) => '<option value="' + item.code + '">' + item.name + '</option>').join("");
-  country.innerHTML = config.countries.map((item) => '<option value="' + item.code + '">' + item.name + '</option>').join("");
+  countries.innerHTML = config.countries.map((item) => '<label class="check-option"><input type="checkbox" name="countries" value="' + item.code + '"> ' + item.name + '</label>').join("");
   language.value = config.defaultLocale.toLowerCase();
-  country.value = config.defaultCountry.toUpperCase();
+  const defaultCountry = countries.querySelector('input[value="' + config.defaultCountry.toUpperCase() + '"]');
+  if (defaultCountry) defaultCountry.checked = true;
+  if (currentUserId) await loadAccount(currentUserId);
 }
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
   const data = Object.fromEntries(new FormData(form).entries());
+  data.countries = [...form.querySelectorAll('input[name="countries"]:checked')].map((input) => input.value);
   data.initData = tg?.initData || "";
   if (!data.displayName && telegramUser) data.displayName = [telegramUser.first_name, telegramUser.last_name].filter(Boolean).join(" ");
+  if (!isValidEmail(data.email)) {
+    result.hidden = false;
+    result.textContent = "Please enter a valid email address.";
+    return;
+  }
+  if (!data.countries.length) {
+    result.hidden = false;
+    result.textContent = "Choose at least one news country.";
+    return;
+  }
 
   const response = await fetch("/api/register", {
     method: "POST",
@@ -983,13 +1125,40 @@ form.addEventListener("submit", async (event) => {
   const payload = await response.json();
   result.hidden = false;
   if (!response.ok) {
-    result.textContent = "Could not create account. Please check your details.";
+    result.textContent = payload.error === "valid_email_required" ? "Please enter a valid email address." : "Could not create account. Please check your details.";
     return;
   }
-  result.innerHTML = payload.botUrl
-    ? '<strong>Access is ready.</strong><p>Your country bot: <a href="' + escapeText(payload.botUrl) + '">' + escapeText(payload.botUrl) + '</a></p>'
-    : renderLockedAccess(payload);
+  currentUserId = payload.userId;
+  localStorage.setItem("marketSignalUserId", currentUserId);
+  result.innerHTML = renderCountryLinks(payload.countryLinks);
+  renderAccount(payload.countryLinks);
 });
+
+account.addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-country]");
+  if (!button || !currentUserId) return;
+  const response = await fetch("/api/account/countries", {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ userId: currentUserId, country: button.dataset.country })
+  });
+  const payload = await response.json();
+  if (!response.ok) {
+    result.hidden = false;
+    result.textContent = "Could not remove this country.";
+    return;
+  }
+  renderAccount(payload.countryLinks);
+  result.hidden = false;
+  result.innerHTML = renderCountryLinks(payload.countryLinks);
+});
+
+async function loadAccount(userId) {
+  const response = await fetch("/api/account?userId=" + encodeURIComponent(userId));
+  if (!response.ok) return;
+  const payload = await response.json();
+  renderAccount(payload.countryLinks);
+}
 
 function renderLockedAccess(payload) {
   if (payload.access?.reason === "country_bot_not_configured") {
@@ -1000,6 +1169,25 @@ function renderLockedAccess(payload) {
     ? '<p><a class="button-link" href="' + escapeText(appendCheckoutParam(checkoutUrl, payload.userId)) + '">Create subscription</a></p>'
     : '';
   return '<strong>Account is ready.</strong><p>Create or activate a subscription to unlock your country bot.</p>' + checkout;
+}
+
+function renderCountryLinks(links = []) {
+  if (!links.length) return '<strong>Account is ready.</strong><p>No country chats are linked yet.</p>';
+  return '<strong>Account is ready.</strong><p>Your news chats:</p><div class="link-list">' + links.map((link) => {
+    const url = link.botUrl;
+    return '<div class="link-row"><span>' + escapeText(link.country) + '</span>' + (url ? '<a href="' + escapeText(url) + '">' + escapeText(url) + '</a>' : '<span>Chat is not configured yet</span>') + '</div>';
+  }).join("") + '</div>';
+}
+
+function renderAccount(links = []) {
+  account.hidden = false;
+  account.innerHTML = '<strong>Linked news chats</strong><div class="link-list">' + (links.length ? links.map((link) => (
+    '<div class="link-row"><span>' + escapeText(link.country) + '</span><button type="button" data-country="' + escapeText(link.country) + '">Remove</button></div>'
+  )).join("") : '<p>No linked chats.</p>') + '</div>';
+}
+
+function isValidEmail(value) {
+  return /^[^\\s@]+@[^\\s@]+\\.[^\\s@]{2,}$/.test(String(value || "").trim());
 }
 
 function appendCheckoutParam(checkoutUrl, userId) {
