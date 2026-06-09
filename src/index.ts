@@ -68,9 +68,13 @@ type CountryLink = {
 };
 
 const ACTIVE_SUBSCRIPTION_STATUSES = ["trialing", "active"] as const;
+const AVAILABLE_NEWS_COUNTRIES = new Set(["IL"]);
+const PUBLIC_NEWS_COUNTRIES = new Set(["IL", "US", "RU"]);
+const COMING_SOON_NEWS_COUNTRIES = new Set(["US", "RU"]);
 
 const COUNTRIES = [
   ["US", "United States"],
+  ["RU", "Russia"],
   ["GB", "United Kingdom"],
   ["GE", "Georgia"],
   ["DE", "Germany"],
@@ -112,9 +116,11 @@ export default {
         return json({
           appName: env.PUBLIC_APP_NAME,
           defaultLocale: env.DEFAULT_LOCALE,
-          defaultCountry: env.DEFAULT_COUNTRY,
+          defaultCountry: AVAILABLE_NEWS_COUNTRIES.has(env.DEFAULT_COUNTRY.toUpperCase()) ? env.DEFAULT_COUNTRY : "IL",
           subscriptionCheckoutUrl: env.SUBSCRIPTION_CHECKOUT_URL ?? null,
-          countries: COUNTRIES.map(([code, name]) => ({ code, name })),
+          countries: COUNTRIES
+            .filter(([code]) => PUBLIC_NEWS_COUNTRIES.has(code))
+            .map(([code, name]) => ({ code, name, isAvailable: AVAILABLE_NEWS_COUNTRIES.has(code), isComingSoon: COMING_SOON_NEWS_COUNTRIES.has(code) })),
           languages: LANGUAGES.map(([code, name]) => ({ code, name }))
         });
       }
@@ -860,9 +866,10 @@ function cleanCountries(value: unknown, legacyCountry: unknown, fallback: string
   const rawValues = Array.isArray(value) ? value : [legacyCountry];
   const countries = rawValues
     .map((item) => cleanString(item)?.toUpperCase())
-    .filter((item): item is string => Boolean(item && /^[A-Z]{2}$/.test(item)));
+    .filter((item): item is string => Boolean(item && /^[A-Z]{2}$/.test(item) && AVAILABLE_NEWS_COUNTRIES.has(item)));
   const unique = [...new Set(countries)].slice(0, 10);
-  return unique.length ? unique : [fallback.toUpperCase()];
+  const fallbackCountry = fallback.toUpperCase();
+  return unique.length ? unique : [AVAILABLE_NEWS_COUNTRIES.has(fallbackCountry) ? fallbackCountry : "IL"];
 }
 
 function cleanLanguage(value: unknown, fallback: string): string {
@@ -1050,6 +1057,9 @@ button:hover { background: #115e59; }
 .button-link { display: inline-flex; align-items: center; min-height: 42px; margin-top: 4px; border-radius: 6px; padding: 0 14px; color: #fff !important; background: #0f766e; text-decoration: none; }
 .check-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px; }
 .check-option { display: flex; align-items: center; gap: 8px; min-height: 36px; font-weight: 700; color: #172026; }
+.check-option.disabled { color: #b91c1c; cursor: not-allowed; }
+.check-option.disabled input { cursor: not-allowed; }
+.dev-badge { margin-left: auto; border-radius: 999px; padding: 3px 7px; background: #fee2e2; color: #991b1b; font-size: 11px; font-weight: 900; }
 .check-option input { width: 16px; min-height: 16px; }
 .link-list { display: grid; gap: 10px; margin-top: 12px; }
 .link-row { display: flex; justify-content: space-between; gap: 10px; align-items: center; padding: 10px; border: 1px solid #e7edef; border-radius: 6px; }
@@ -1093,7 +1103,12 @@ async function boot() {
   const config = await fetch("/api/config").then((response) => response.json());
   appConfig = config;
   language.innerHTML = config.languages.map((item) => '<option value="' + item.code + '">' + item.name + '</option>').join("");
-  countries.innerHTML = config.countries.map((item) => '<label class="check-option"><input type="checkbox" name="countries" value="' + item.code + '"> ' + item.name + '</label>').join("");
+  countries.innerHTML = config.countries.map((item) => {
+    const disabled = item.isAvailable ? "" : " disabled";
+    const className = item.isAvailable ? "check-option" : "check-option disabled";
+    const badge = item.isComingSoon ? '<span class="dev-badge">In development</span>' : "";
+    return '<label class="' + className + '"><input type="checkbox" name="countries" value="' + item.code + '"' + disabled + '> ' + item.name + badge + '</label>';
+  }).join("");
   language.value = config.defaultLocale.toLowerCase();
   const defaultCountry = countries.querySelector('input[value="' + config.defaultCountry.toUpperCase() + '"]');
   if (defaultCountry) defaultCountry.checked = true;
