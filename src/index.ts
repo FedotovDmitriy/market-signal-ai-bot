@@ -4,6 +4,7 @@ interface Env {
   PUBLIC_APP_NAME: string;
   DEFAULT_LOCALE: string;
   DEFAULT_COUNTRY: string;
+  ADMIN_USERNAME?: string;
   ADMIN_TOKEN?: string;
   TELEGRAM_BOT_TOKEN?: string;
   TELEGRAM_WEBHOOK_SECRET?: string;
@@ -165,6 +166,12 @@ export default {
         const guard = await requireAdmin(request, env);
         if (guard) return withCors(guard);
         return withCors(await adminUsers(env, url));
+      }
+
+      if (url.pathname === "/api/admin/users" && request.method === "PUT") {
+        const guard = await requireAdmin(request, env);
+        if (guard) return withCors(guard);
+        return withCors(await updateAdminUser(request, env, ctx));
       }
 
       if (url.pathname === "/api/admin/events" && request.method === "GET") {
@@ -525,6 +532,51 @@ async function adminUsers(env: Env, url: URL): Promise<Response> {
   return json({ users: result.results });
 }
 
+async function updateAdminUser(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const body = await readJson<Record<string, unknown>>(request);
+  const userId = cleanString(body.userId);
+  if (!userId) return json({ error: "userId_required" }, 400);
+
+  const existing = await findUserById(env, userId);
+  if (!existing) return json({ error: "user_not_found" }, 404);
+
+  const emailInput = cleanString(body.email);
+  const email = emailInput ? emailInput.toLowerCase() : null;
+  if (email && !isValidEmail(email)) return json({ error: "valid_email_required" }, 400);
+
+  const displayName = cleanString(body.displayName);
+  const language = cleanLanguage(body.language, existing.language);
+  const status = cleanEnum(body.status, ["active", "blocked"], existing.status === "blocked" ? "blocked" : "active");
+  const countries = cleanCountries(body.countries, body.country, existing.country);
+  const countryLinks = await buildCountryLinks(env, countries);
+  const primary = countryLinks[0];
+
+  await env.DB.prepare(
+    `UPDATE users
+     SET email = ?,
+         display_name = ?,
+         language = ?,
+         country = ?,
+         selected_bot_url = ?,
+         status = ?,
+         updated_at = CURRENT_TIMESTAMP
+     WHERE id = ?`
+  ).bind(email, displayName, language, primary.country, primary.botUrl, status, userId).run();
+
+  await env.DB.prepare(
+    `INSERT INTO user_settings (user_id, language, country)
+     VALUES (?, ?, ?)
+     ON CONFLICT(user_id) DO UPDATE SET language = excluded.language, country = excluded.country, updated_at = CURRENT_TIMESTAMP`
+  ).bind(userId, language, primary.country).run();
+
+  await replaceCountryLinks(env, userId, countryLinks);
+
+  ctx.waitUntil(audit(env, userId, "admin", "user.updated", request, { email, displayName, language, status, countries }));
+
+  const user = await findUserById(env, userId);
+  return json({ user, countryLinks });
+}
+
 async function adminEvents(env: Env): Promise<Response> {
   const result = await env.DB.prepare(
     `SELECT id, user_id, actor, event_type, payload_json, created_at
@@ -697,6 +749,10 @@ async function audit(env: Env, userId: string | null, actor: string, eventType: 
 async function requireAdmin(request: Request, env: Env): Promise<Response | null> {
   if (!env.ADMIN_TOKEN) return json({ error: "admin_token_not_configured" }, 503);
   const token = bearerToken(request) ?? new URL(request.url).searchParams.get("token");
+  const adminUser = request.headers.get("X-Admin-User") ?? new URL(request.url).searchParams.get("adminUser");
+  if (env.ADMIN_USERNAME && (!adminUser || !(await timingSafeEqual(adminUser, env.ADMIN_USERNAME)))) {
+    return json({ error: "unauthorized" }, 401);
+  }
   if (!token || !(await timingSafeEqual(token, env.ADMIN_TOKEN))) {
     return json({ error: "unauthorized" }, 401);
   }
@@ -910,7 +966,7 @@ function withCors(response: Response): Response {
   const headers = new Headers(response.headers);
   headers.set("Access-Control-Allow-Origin", "*");
   headers.set("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS");
-  headers.set("Access-Control-Allow-Headers", "Content-Type,Authorization,X-Webhook-Secret,X-Timestamp,X-Signature,X-Market-Signal-Timestamp,X-Market-Signal-Signature");
+  headers.set("Access-Control-Allow-Headers", "Content-Type,Authorization,X-Admin-User,X-Webhook-Secret,X-Timestamp,X-Signature,X-Market-Signal-Timestamp,X-Market-Signal-Signature");
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
@@ -981,52 +1037,56 @@ function renderAdminApp(env: Env): string {
       </div>
     </section>
     <form id="authForm" class="panel auth-row">
-      <input name="token" type="password" autocomplete="current-password" placeholder="Admin token">
+      <input name="username" autocomplete="username" placeholder="Admin name">
+      <input name="token" type="password" autocomplete="current-password" placeholder="Admin password">
       <button type="submit">Open</button>
     </form>
-    <section id="refreshInfo" class="time-strip"></section>
-    <section id="overview" class="metrics"></section>
-    <section class="panel">
-      <h2>Users</h2>
-      <form id="filtersForm" class="filters-row">
-        <input name="search" placeholder="Search email, Telegram ID, name">
-        <input name="country" placeholder="Country">
-        <select name="status">
-          <option value="">Any status</option>
-          <option value="active">Active</option>
-          <option value="blocked">Blocked</option>
-        </select>
-        <button type="submit">Filter</button>
-      </form>
-      <div id="users" class="table"></div>
-    </section>
-    <section class="panel">
-      <h2>Bot routes</h2>
-      <form id="routeForm" class="route-row">
-        <input name="country" placeholder="IL">
-        <input name="language" placeholder="he">
-        <input name="botUrl" placeholder="https://t.me/your_israel_bot">
-        <label class="inline-check"><input name="isActive" type="checkbox" checked> Active</label>
-        <button type="submit">Save</button>
-      </form>
-      <div id="routes" class="table"></div>
-    </section>
-    <section class="panel">
-      <h2>News sources</h2>
-      <form id="sourceForm" class="source-row">
-        <input name="name" placeholder="Calcalist">
-        <input name="country" placeholder="IL">
-        <input name="language" placeholder="he">
-        <input name="handleOrUrl" placeholder="https://t.me/source">
-        <label class="inline-check"><input name="isActive" type="checkbox" checked> Active</label>
-        <button type="submit">Save</button>
-      </form>
-      <div id="sources" class="table"></div>
-    </section>
-    <section class="panel">
-      <h2>Events</h2>
-      <div id="events" class="events"></div>
-    </section>
+    <section id="adminStatus" class="status" hidden></section>
+    <div id="adminContent" hidden>
+      <section id="refreshInfo" class="time-strip"></section>
+      <section id="overview" class="metrics"></section>
+      <section class="panel">
+        <h2>Users</h2>
+        <form id="filtersForm" class="filters-row">
+          <input name="search" placeholder="Search email, Telegram ID, name">
+          <input name="country" placeholder="Country">
+          <select name="status">
+            <option value="">Any status</option>
+            <option value="active">Active</option>
+            <option value="blocked">Blocked</option>
+          </select>
+          <button type="submit">Filter</button>
+        </form>
+        <div id="users" class="table"></div>
+      </section>
+      <section class="panel">
+        <h2>Bot routes</h2>
+        <form id="routeForm" class="route-row">
+          <input name="country" placeholder="IL">
+          <input name="language" placeholder="he">
+          <input name="botUrl" placeholder="https://t.me/your_israel_bot">
+          <label class="inline-check"><input name="isActive" type="checkbox" checked> Active</label>
+          <button type="submit">Save</button>
+        </form>
+        <div id="routes" class="table"></div>
+      </section>
+      <section class="panel">
+        <h2>News sources</h2>
+        <form id="sourceForm" class="source-row">
+          <input name="name" placeholder="Calcalist">
+          <input name="country" placeholder="IL">
+          <input name="language" placeholder="he">
+          <input name="handleOrUrl" placeholder="https://t.me/source">
+          <label class="inline-check"><input name="isActive" type="checkbox" checked> Active</label>
+          <button type="submit">Save</button>
+        </form>
+        <div id="sources" class="table"></div>
+      </section>
+      <section class="panel">
+        <h2>Events</h2>
+        <div id="events" class="events"></div>
+      </section>
+    </div>
   </main>
   <script>${adminAppScript()}</script>
 </body>
@@ -1066,6 +1126,11 @@ button:hover { background: #115e59; }
 .link-row button { min-height: 34px; padding: 0 10px; background: #7f1d1d; }
 .link-row button:hover { background: #991b1b; }
 .auth-row { grid-template-columns: minmax(0, 1fr) auto; margin-bottom: 18px; }
+.auth-row { grid-template-columns: minmax(140px, 180px) minmax(180px, 1fr) auto; }
+.status { margin: 0 0 18px; border: 1px solid #cad6da; border-radius: 8px; padding: 12px 14px; background: #fff; color: #34474f; font-weight: 700; }
+.status.success { border-color: #99f6e4; background: #ecfdf5; color: #115e59; }
+.status.error { border-color: #fecaca; background: #fef2f2; color: #991b1b; }
+.status.loading { border-color: #bfdbfe; background: #eff6ff; color: #1d4ed8; }
 .time-strip { display: flex; flex-wrap: wrap; gap: 10px 18px; margin: 0 0 18px; color: #607077; font-size: 13px; }
 .time-strip strong { color: #172026; }
 .filters-row { grid-template-columns: minmax(180px, 1fr) 110px 150px auto; margin-bottom: 14px; }
@@ -1080,6 +1145,10 @@ button:hover { background: #115e59; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid #e7edef; white-space: nowrap; }
 th { color: #607077; font-size: 12px; }
+.editable-table input, .editable-table select { min-height: 34px; min-width: 110px; padding: 6px 8px; font-size: 13px; }
+.editable-table .email-input { min-width: 190px; }
+.editable-table .name-input { min-width: 140px; }
+.editable-table button { min-height: 34px; padding: 0 10px; }
 .events { display: grid; gap: 8px; font-size: 13px; }
 .event { border-bottom: 1px solid #e7edef; padding: 8px 0; }
 @media (max-width: 860px) { .metrics, .auth-row, .filters-row, .route-row, .source-row { grid-template-columns: 1fr; } }
@@ -1227,6 +1296,8 @@ const authForm = document.querySelector("#authForm");
 const filtersForm = document.querySelector("#filtersForm");
 const routeForm = document.querySelector("#routeForm");
 const sourceForm = document.querySelector("#sourceForm");
+const adminContent = document.querySelector("#adminContent");
+const adminStatus = document.querySelector("#adminStatus");
 const refreshInfo = document.querySelector("#refreshInfo");
 const overview = document.querySelector("#overview");
 const users = document.querySelector("#users");
@@ -1234,11 +1305,16 @@ const events = document.querySelector("#events");
 const routes = document.querySelector("#routes");
 const sources = document.querySelector("#sources");
 let token = sessionStorage.getItem("adminToken") || "";
+let adminUser = sessionStorage.getItem("adminUser") || "";
+if (adminUser) authForm.elements.username.value = adminUser;
+if (token) authForm.elements.token.value = token;
 if (token) load();
 
 authForm.addEventListener("submit", (event) => {
   event.preventDefault();
+  adminUser = new FormData(authForm).get("username");
   token = new FormData(authForm).get("token");
+  sessionStorage.setItem("adminUser", adminUser);
   sessionStorage.setItem("adminToken", token);
   load();
 });
@@ -1250,63 +1326,119 @@ filtersForm.addEventListener("submit", (event) => {
 
 routeForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  const data = Object.fromEntries(new FormData(routeForm).entries());
-  data.isActive = routeForm.elements.isActive.checked;
-  await api("/api/admin/bot-routes", {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(data)
-  });
-  routeForm.reset();
-  routeForm.elements.isActive.checked = true;
-  load();
+  setStatus("Saving bot route...", "loading");
+  try {
+    const data = Object.fromEntries(new FormData(routeForm).entries());
+    data.isActive = routeForm.elements.isActive.checked;
+    await api("/api/admin/bot-routes", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data)
+    });
+    routeForm.reset();
+    routeForm.elements.isActive.checked = true;
+    await load("Bot route saved.");
+  } catch (error) {
+    setStatus(error.message || "Could not save bot route.", "error");
+  }
 });
 
 sourceForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  const data = Object.fromEntries(new FormData(sourceForm).entries());
-  data.isActive = sourceForm.elements.isActive.checked;
-  await api("/api/admin/news-sources", {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(data)
-  });
-  sourceForm.reset();
-  sourceForm.elements.country.value = "IL";
-  sourceForm.elements.language.value = "he";
-  sourceForm.elements.isActive.checked = true;
-  load();
+  setStatus("Saving news source...", "loading");
+  try {
+    const data = Object.fromEntries(new FormData(sourceForm).entries());
+    data.isActive = sourceForm.elements.isActive.checked;
+    await api("/api/admin/news-sources", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data)
+    });
+    sourceForm.reset();
+    sourceForm.elements.country.value = "IL";
+    sourceForm.elements.language.value = "he";
+    sourceForm.elements.isActive.checked = true;
+    await load("News source saved.");
+  } catch (error) {
+    setStatus(error.message || "Could not save news source.", "error");
+  }
+});
+
+users.addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-user-id]");
+  if (!button) return;
+  const row = button.closest("tr");
+  const data = {
+    userId: button.dataset.userId,
+    email: row.querySelector('[name="email"]').value,
+    displayName: row.querySelector('[name="displayName"]').value,
+    language: row.querySelector('[name="language"]').value,
+    country: row.querySelector('[name="country"]').value,
+    status: row.querySelector('[name="status"]').value
+  };
+  setStatus("Saving user...", "loading");
+  try {
+    await api("/api/admin/users", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data)
+    });
+    await load("User saved.");
+  } catch (error) {
+    setStatus(error.message || "Could not save user.", "error");
+  }
 });
 
 async function api(path, options = {}) {
-  const headers = { Authorization: "Bearer " + token, ...(options.headers || {}) };
+  const headers = { Authorization: "Bearer " + token, "X-Admin-User": adminUser, ...(options.headers || {}) };
   const response = await fetch(path, { ...options, headers });
-  if (!response.ok) throw new Error("Unauthorized");
+  if (!response.ok) {
+    let message = "Request failed.";
+    try {
+      const payload = await response.json();
+      message = payload.error || message;
+    } catch {}
+    throw new Error(message);
+  }
   return response.json();
 }
 
-async function load() {
-  const query = new URLSearchParams(new FormData(filtersForm)).toString();
-  const [summary, userData, eventData, routeData, sourceData] = await Promise.all([
-    api("/api/admin/overview"),
-    api("/api/admin/users?" + query),
-    api("/api/admin/events"),
-    api("/api/admin/bot-routes"),
-    api("/api/admin/news-sources")
-  ]);
-  overview.innerHTML = [
-    metric("Users", summary.users),
-    metric("Active subscriptions", summary.activeSubscriptions),
-    metric("Events 24h", summary.events24h),
-    metric("Active bot routes", summary.activeBotRoutes),
-    metric("Active news sources", summary.activeNewsSources),
-    metric("Server time", formatTime(summary.serverTime))
-  ].join("");
-  refreshInfo.innerHTML = '<span><strong>Server:</strong> ' + formatTime(summary.serverTime) + '</span><span><strong>Local:</strong> ' + formatTime(new Date().toISOString()) + '</span><span><strong>Refreshed:</strong> ' + new Date().toLocaleString() + '</span>';
-  users.innerHTML = renderUsers(userData.users);
-  routes.innerHTML = renderRoutes(routeData.routes);
-  sources.innerHTML = renderSources(sourceData.sources);
-  events.innerHTML = eventData.events.map((event) => '<div class="event"><strong>' + event.event_type + '</strong><br>' + event.actor + ' - ' + event.created_at + '</div>').join("");
+async function load(successMessage = "Admin panel loaded.") {
+  setStatus("Loading admin panel...", "loading");
+  try {
+    const query = new URLSearchParams(new FormData(filtersForm)).toString();
+    const [summary, userData, eventData, routeData, sourceData] = await Promise.all([
+      api("/api/admin/overview"),
+      api("/api/admin/users?" + query),
+      api("/api/admin/events"),
+      api("/api/admin/bot-routes"),
+      api("/api/admin/news-sources")
+    ]);
+    adminContent.hidden = false;
+    overview.innerHTML = [
+      metric("Users", summary.users),
+      metric("Active subscriptions", summary.activeSubscriptions),
+      metric("Events 24h", summary.events24h),
+      metric("Active bot routes", summary.activeBotRoutes),
+      metric("Active news sources", summary.activeNewsSources),
+      metric("Server time", formatTime(summary.serverTime))
+    ].join("");
+    refreshInfo.innerHTML = '<span><strong>Server:</strong> ' + formatTime(summary.serverTime) + '</span><span><strong>Local:</strong> ' + formatTime(new Date().toISOString()) + '</span><span><strong>Refreshed:</strong> ' + new Date().toLocaleString() + '</span>';
+    users.innerHTML = renderUsers(userData.users);
+    routes.innerHTML = renderRoutes(routeData.routes);
+    sources.innerHTML = renderSources(sourceData.sources);
+    events.innerHTML = eventData.events.map((event) => '<div class="event"><strong>' + escapeText(event.event_type) + '</strong><br>' + escapeText(event.actor) + ' - ' + escapeText(event.created_at) + '</div>').join("");
+    setStatus(successMessage, "success");
+  } catch (error) {
+    adminContent.hidden = true;
+    setStatus(error.message === "unauthorized" ? "Wrong admin name or password." : error.message, "error");
+  }
+}
+
+function setStatus(message, type) {
+  adminStatus.hidden = false;
+  adminStatus.className = "status " + type;
+  adminStatus.textContent = message;
 }
 
 function metric(label, value) {
@@ -1318,9 +1450,23 @@ function formatTime(value) {
 }
 
 function renderUsers(rows) {
-  return '<table><thead><tr><th>User</th><th>Country</th><th>Language</th><th>Status</th><th>Subscription</th><th>Created</th></tr></thead><tbody>' +
-    rows.map((row) => '<tr><td>' + escapeText(row.email || row.telegram_user_id || row.id) + '</td><td>' + escapeText(row.country) + '</td><td>' + escapeText(row.language) + '</td><td>' + escapeText(row.status) + '</td><td>' + escapeText(row.subscription_status || "none") + '</td><td>' + escapeText(row.created_at) + '</td></tr>').join("") +
+  return '<table class="editable-table"><thead><tr><th>Email</th><th>Name</th><th>Country</th><th>Language</th><th>Status</th><th>Subscription</th><th>Telegram</th><th>Created</th><th></th></tr></thead><tbody>' +
+    rows.map((row) => '<tr>' +
+      '<td><input class="email-input" name="email" type="email" value="' + escapeText(row.email || "") + '"></td>' +
+      '<td><input class="name-input" name="displayName" value="' + escapeText(row.display_name || "") + '"></td>' +
+      '<td><input name="country" value="' + escapeText(row.country || "IL") + '"></td>' +
+      '<td><select name="language">' + renderOption("en", "English", row.language) + renderOption("ru", "Russian", row.language) + renderOption("he", "Hebrew", row.language) + '</select></td>' +
+      '<td><select name="status">' + renderOption("active", "Active", row.status) + renderOption("blocked", "Blocked", row.status) + '</select></td>' +
+      '<td>' + escapeText(row.subscription_status || "none") + '</td>' +
+      '<td>' + escapeText(row.telegram_user_id || "") + '</td>' +
+      '<td>' + escapeText(row.created_at) + '</td>' +
+      '<td><button type="button" data-user-id="' + escapeText(row.id) + '">Save</button></td>' +
+    '</tr>').join("") +
     '</tbody></table>';
+}
+
+function renderOption(value, label, selectedValue) {
+  return '<option value="' + escapeText(value) + '"' + (value === selectedValue ? " selected" : "") + '>' + escapeText(label) + '</option>';
 }
 
 function renderRoutes(rows) {

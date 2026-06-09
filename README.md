@@ -31,6 +31,7 @@ npx wrangler d1 migrations apply market-signal-ai-bot-db --remote
 Set secrets:
 
 ```powershell
+npx wrangler secret put ADMIN_USERNAME
 npx wrangler secret put ADMIN_TOKEN
 npx wrangler secret put SUBSCRIPTION_WEBHOOK_SECRET
 npx wrangler secret put TELEGRAM_BOT_TOKEN
@@ -44,6 +45,8 @@ Optional public checkout URL in `wrangler.jsonc`:
 ```
 
 When this value is configured, the Telegram WebApp can send a newly registered user to your subscription checkout with `userId` appended to the URL.
+
+`ADMIN_USERNAME` is optional. If it is configured, `/admin` and `/api/admin/*` require both the admin name and `ADMIN_TOKEN`.
 
 `ADMIN_TOKEN` is the private password for `/admin` and `/api/admin/*`. Rotate it with:
 
@@ -137,9 +140,9 @@ The response includes `botUrl` only when the subscription status is `trialing` o
 
 ## Admin Access
 
-Open `/admin`, enter `ADMIN_TOKEN`, and the dashboard will load users, subscriptions, and recent audit events.
+Open `/admin`, enter the admin name and `ADMIN_TOKEN`, and the dashboard will load users, subscriptions, and recent audit events.
 
-The admin dashboard also manages country bot routes and approved news sources for the upstream news pipeline.
+The admin dashboard also manages editable user rows, country bot routes, and approved news sources for the upstream news pipeline.
 
 ## GitHub Auto Deploy
 
