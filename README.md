@@ -142,7 +142,7 @@ The response includes `botUrl` only when the subscription status is `trialing` o
 
 Open `/admin`, enter the admin name and `ADMIN_TOKEN`, and the dashboard will load users, subscriptions, and recent audit events.
 
-The admin dashboard also manages editable user rows, country bot routes, and approved news sources for the upstream news pipeline.
+The admin dashboard also manages editable user rows, country bot routes, and the right-side audit event log.
 
 ## GitHub Auto Deploy
 

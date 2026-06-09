@@ -192,16 +192,10 @@ export default {
         return withCors(await upsertBotRoute(request, env, ctx));
       }
 
-      if (url.pathname === "/api/admin/news-sources" && request.method === "GET") {
+      if (url.pathname === "/api/admin/bot-routes" && request.method === "DELETE") {
         const guard = await requireAdmin(request, env);
         if (guard) return withCors(guard);
-        return withCors(await adminNewsSources(env));
-      }
-
-      if (url.pathname === "/api/admin/news-sources" && request.method === "PUT") {
-        const guard = await requireAdmin(request, env);
-        if (guard) return withCors(guard);
-        return withCors(await upsertNewsSource(request, env, ctx));
+        return withCors(await deleteBotRoute(request, env, ctx));
       }
 
       return json({ error: "not_found" }, 404);
@@ -478,13 +472,12 @@ async function setupTelegramWebApp(request: Request, env: Env): Promise<Response
 }
 
 async function adminOverview(env: Env): Promise<Response> {
-  const [users, activeSubscriptions, events, countries, botRoutes, newsSources] = await Promise.all([
+  const [users, activeSubscriptions, events, countries, botRoutes] = await Promise.all([
     env.DB.prepare("SELECT COUNT(*) AS count FROM users").first<{ count: number }>(),
     env.DB.prepare("SELECT COUNT(*) AS count FROM subscriptions WHERE status IN ('trialing', 'active')").first<{ count: number }>(),
     env.DB.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE created_at >= datetime('now', '-24 hours')").first<{ count: number }>(),
     env.DB.prepare("SELECT country, COUNT(*) AS count FROM users GROUP BY country ORDER BY count DESC LIMIT 10").all(),
-    env.DB.prepare("SELECT COUNT(*) AS count FROM bot_routes WHERE is_active = 1").first<{ count: number }>(),
-    env.DB.prepare("SELECT COUNT(*) AS count FROM news_sources WHERE is_active = 1").first<{ count: number }>()
+    env.DB.prepare("SELECT COUNT(*) AS count FROM bot_routes WHERE is_active = 1").first<{ count: number }>()
   ]);
 
   return json({
@@ -492,7 +485,6 @@ async function adminOverview(env: Env): Promise<Response> {
     activeSubscriptions: activeSubscriptions?.count ?? 0,
     events24h: events?.count ?? 0,
     activeBotRoutes: botRoutes?.count ?? 0,
-    activeNewsSources: newsSources?.count ?? 0,
     serverTime: new Date().toISOString(),
     countries: countries.results
   });
@@ -601,6 +593,7 @@ async function adminBotRoutes(env: Env): Promise<Response> {
 async function upsertBotRoute(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const body = await readJson<Record<string, unknown>>(request);
   const country = cleanCountry(body.country, env.DEFAULT_COUNTRY);
+  const previousCountry = cleanCountry(body.previousCountry, country);
   const language = cleanLanguage(body.language, env.DEFAULT_LOCALE);
   const botUrl = cleanString(body.botUrl);
   const isActive = body.isActive === false ? 0 : 1;
@@ -618,53 +611,25 @@ async function upsertBotRoute(request: Request, env: Env, ctx: ExecutionContext)
        updated_at = CURRENT_TIMESTAMP`
   ).bind(country, language, botUrl, isActive).run();
 
-  ctx.waitUntil(audit(env, null, "admin", "bot_route.upserted", request, { country, language, botUrl, isActive }));
+  if (previousCountry !== country) {
+    await env.DB.prepare("DELETE FROM bot_routes WHERE country = ?").bind(previousCountry).run();
+  }
+
+  ctx.waitUntil(audit(env, null, "admin", "bot_route.upserted", request, { country, previousCountry, language, botUrl, isActive }));
 
   return json({ country, language, botUrl, isActive: Boolean(isActive) });
 }
 
-async function adminNewsSources(env: Env): Promise<Response> {
-  const result = await env.DB.prepare(
-    `SELECT id, country, language, source_type, name, handle_or_url, is_active, notes, updated_at
-     FROM news_sources
-     ORDER BY country ASC, name ASC`
-  ).all();
-
-  return json({ sources: result.results });
-}
-
-async function upsertNewsSource(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+async function deleteBotRoute(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const body = await readJson<Record<string, unknown>>(request);
-  const country = cleanCountry(body.country, "IL");
-  const language = cleanLanguage(body.language, "he");
-  const sourceType = cleanEnum(body.sourceType, ["telegram", "rss", "website"], "telegram");
-  const name = cleanString(body.name);
-  const handleOrUrl = cleanString(body.handleOrUrl);
-  const notes = cleanString(body.notes);
-  const isActive = body.isActive === false ? 0 : 1;
-  if (!name || !handleOrUrl) return json({ error: "name_and_handle_or_url_required" }, 400);
-  if (sourceType === "telegram" && !/^https:\/\/t\.me\/[a-zA-Z0-9_]+$/.test(handleOrUrl)) {
-    return json({ error: "valid_t_me_source_required" }, 400);
-  }
+  const country = cleanCountry(body.country, "");
+  if (!country) return json({ error: "country_required" }, 400);
 
-  const id = cleanString(body.id) ?? `${country.toLowerCase()}-${name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`;
-  await env.DB.prepare(
-    `INSERT INTO news_sources (id, country, language, source_type, name, handle_or_url, is_active, notes, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-     ON CONFLICT(id) DO UPDATE SET
-       country = excluded.country,
-       language = excluded.language,
-       source_type = excluded.source_type,
-       name = excluded.name,
-       handle_or_url = excluded.handle_or_url,
-       is_active = excluded.is_active,
-       notes = excluded.notes,
-       updated_at = CURRENT_TIMESTAMP`
-  ).bind(id, country, language, sourceType, name, handleOrUrl, isActive, notes).run();
+  await env.DB.prepare("DELETE FROM bot_routes WHERE country = ?").bind(country).run();
 
-  ctx.waitUntil(audit(env, null, "admin", "news_source.upserted", request, { id, country, language, sourceType, name, handleOrUrl, isActive }));
+  ctx.waitUntil(audit(env, null, "admin", "bot_route.deleted", request, { country }));
 
-  return json({ id, country, language, sourceType, name, handleOrUrl, isActive: Boolean(isActive), notes });
+  return json({ country, deleted: true });
 }
 
 async function findUser(env: Env, input: { telegramUserId?: string | null; email?: string | null }): Promise<AppUser | null> {
@@ -1045,46 +1010,38 @@ function renderAdminApp(env: Env): string {
     <div id="adminContent" hidden>
       <section id="refreshInfo" class="time-strip"></section>
       <section id="overview" class="metrics"></section>
-      <section class="panel">
-        <h2>Users</h2>
-        <form id="filtersForm" class="filters-row">
-          <input name="search" placeholder="Search email, Telegram ID, name">
-          <input name="country" placeholder="Country">
-          <select name="status">
-            <option value="">Any status</option>
-            <option value="active">Active</option>
-            <option value="blocked">Blocked</option>
-          </select>
-          <button type="submit">Filter</button>
-        </form>
-        <div id="users" class="table"></div>
-      </section>
-      <section class="panel">
-        <h2>Bot routes</h2>
-        <form id="routeForm" class="route-row">
-          <input name="country" placeholder="IL">
-          <input name="language" placeholder="he">
-          <input name="botUrl" placeholder="https://t.me/your_israel_bot">
-          <label class="inline-check"><input name="isActive" type="checkbox" checked> Active</label>
-          <button type="submit">Save</button>
-        </form>
-        <div id="routes" class="table"></div>
-      </section>
-      <section class="panel">
-        <h2>News sources</h2>
-        <form id="sourceForm" class="source-row">
-          <input name="name" placeholder="Calcalist">
-          <input name="country" placeholder="IL">
-          <input name="language" placeholder="he">
-          <input name="handleOrUrl" placeholder="https://t.me/source">
-          <label class="inline-check"><input name="isActive" type="checkbox" checked> Active</label>
-          <button type="submit">Save</button>
-        </form>
-        <div id="sources" class="table"></div>
-      </section>
-      <section class="panel">
-        <h2>Events</h2>
-        <div id="events" class="events"></div>
+      <section class="admin-grid">
+        <div class="admin-main">
+          <section class="panel">
+            <h2>Users</h2>
+            <form id="filtersForm" class="filters-row">
+              <input name="search" placeholder="Search email, Telegram ID, name">
+              <input name="country" placeholder="Country">
+              <select name="status">
+                <option value="">Any status</option>
+                <option value="active">Active</option>
+                <option value="blocked">Blocked</option>
+              </select>
+              <button type="submit">Filter</button>
+            </form>
+            <div id="users" class="table"></div>
+          </section>
+          <section class="panel">
+            <h2>Bot routes</h2>
+            <form id="routeForm" class="route-row">
+              <input name="country" placeholder="IL">
+              <input name="language" placeholder="he">
+              <input name="botUrl" placeholder="https://t.me/your_israel_bot">
+              <label class="inline-check"><input name="isActive" type="checkbox" checked> Active</label>
+              <button type="submit">Save</button>
+            </form>
+            <div id="routes" class="table"></div>
+          </section>
+        </div>
+        <aside class="panel event-panel">
+          <h2>Events</h2>
+          <div id="events" class="events"></div>
+        </aside>
       </section>
     </div>
   </main>
@@ -1135,9 +1092,11 @@ button:hover { background: #115e59; }
 .time-strip strong { color: #172026; }
 .filters-row { grid-template-columns: minmax(180px, 1fr) 110px 150px auto; margin-bottom: 14px; }
 .route-row { grid-template-columns: 80px 90px minmax(220px, 1fr) 110px auto; margin-bottom: 14px; }
-.source-row { grid-template-columns: minmax(140px, 1fr) 80px 90px minmax(220px, 1fr) 110px auto; margin-bottom: 14px; }
 .inline-check { display: flex; align-items: center; gap: 8px; min-height: 44px; }
 .inline-check input { width: 16px; min-height: 16px; }
+.admin-grid { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 18px; align-items: start; }
+.admin-main { display: grid; gap: 18px; }
+.event-panel { position: sticky; top: 18px; max-height: calc(100vh - 36px); overflow: auto; }
 .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 18px; }
 .metric { background: #fff; border: 1px solid #dfe7e9; border-radius: 8px; padding: 16px; }
 .metric strong { display: block; font-size: 28px; }
@@ -1149,9 +1108,12 @@ th { color: #607077; font-size: 12px; }
 .editable-table .email-input { min-width: 190px; }
 .editable-table .name-input { min-width: 140px; }
 .editable-table button { min-height: 34px; padding: 0 10px; }
+.danger-button { background: #7f1d1d; }
+.danger-button:hover { background: #991b1b; }
 .events { display: grid; gap: 8px; font-size: 13px; }
 .event { border-bottom: 1px solid #e7edef; padding: 8px 0; }
-@media (max-width: 860px) { .metrics, .auth-row, .filters-row, .route-row, .source-row { grid-template-columns: 1fr; } }
+@media (max-width: 980px) { .admin-grid { grid-template-columns: 1fr; } .event-panel { position: static; max-height: none; } }
+@media (max-width: 860px) { .metrics, .auth-row, .filters-row, .route-row { grid-template-columns: 1fr; } }
 `;
 }
 
@@ -1295,7 +1257,6 @@ function adminAppScript(): string {
 const authForm = document.querySelector("#authForm");
 const filtersForm = document.querySelector("#filtersForm");
 const routeForm = document.querySelector("#routeForm");
-const sourceForm = document.querySelector("#sourceForm");
 const adminContent = document.querySelector("#adminContent");
 const adminStatus = document.querySelector("#adminStatus");
 const refreshInfo = document.querySelector("#refreshInfo");
@@ -1303,7 +1264,6 @@ const overview = document.querySelector("#overview");
 const users = document.querySelector("#users");
 const events = document.querySelector("#events");
 const routes = document.querySelector("#routes");
-const sources = document.querySelector("#sources");
 let token = sessionStorage.getItem("adminToken") || "";
 let adminUser = sessionStorage.getItem("adminUser") || "";
 if (adminUser) authForm.elements.username.value = adminUser;
@@ -1343,27 +1303,6 @@ routeForm.addEventListener("submit", async (event) => {
   }
 });
 
-sourceForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  setStatus("Saving news source...", "loading");
-  try {
-    const data = Object.fromEntries(new FormData(sourceForm).entries());
-    data.isActive = sourceForm.elements.isActive.checked;
-    await api("/api/admin/news-sources", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(data)
-    });
-    sourceForm.reset();
-    sourceForm.elements.country.value = "IL";
-    sourceForm.elements.language.value = "he";
-    sourceForm.elements.isActive.checked = true;
-    await load("News source saved.");
-  } catch (error) {
-    setStatus(error.message || "Could not save news source.", "error");
-  }
-});
-
 users.addEventListener("click", async (event) => {
   const button = event.target.closest("button[data-user-id]");
   if (!button) return;
@@ -1389,6 +1328,47 @@ users.addEventListener("click", async (event) => {
   }
 });
 
+routes.addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-route-action]");
+  if (!button) return;
+  const row = button.closest("tr");
+  const country = button.dataset.country || row.querySelector('[name="country"]')?.value;
+  if (button.dataset.routeAction === "save") {
+    const data = {
+      country: row.querySelector('[name="country"]').value,
+      previousCountry: button.dataset.country,
+      language: row.querySelector('[name="language"]').value,
+      botUrl: row.querySelector('[name="botUrl"]').value,
+      isActive: row.querySelector('[name="isActive"]').checked
+    };
+    setStatus("Saving bot route...", "loading");
+    try {
+      await api("/api/admin/bot-routes", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data)
+      });
+      await load("Bot route saved.");
+    } catch (error) {
+      setStatus(error.message || "Could not save bot route.", "error");
+    }
+    return;
+  }
+  if (button.dataset.routeAction === "delete") {
+    setStatus("Deleting bot route...", "loading");
+    try {
+      await api("/api/admin/bot-routes", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ country })
+      });
+      await load("Bot route deleted.");
+    } catch (error) {
+      setStatus(error.message || "Could not delete bot route.", "error");
+    }
+  }
+});
+
 async function api(path, options = {}) {
   const headers = { Authorization: "Bearer " + token, "X-Admin-User": adminUser, ...(options.headers || {}) };
   const response = await fetch(path, { ...options, headers });
@@ -1407,12 +1387,11 @@ async function load(successMessage = "Admin panel loaded.") {
   setStatus("Loading admin panel...", "loading");
   try {
     const query = new URLSearchParams(new FormData(filtersForm)).toString();
-    const [summary, userData, eventData, routeData, sourceData] = await Promise.all([
+    const [summary, userData, eventData, routeData] = await Promise.all([
       api("/api/admin/overview"),
       api("/api/admin/users?" + query),
       api("/api/admin/events"),
-      api("/api/admin/bot-routes"),
-      api("/api/admin/news-sources")
+      api("/api/admin/bot-routes")
     ]);
     adminContent.hidden = false;
     overview.innerHTML = [
@@ -1420,13 +1399,11 @@ async function load(successMessage = "Admin panel loaded.") {
       metric("Active subscriptions", summary.activeSubscriptions),
       metric("Events 24h", summary.events24h),
       metric("Active bot routes", summary.activeBotRoutes),
-      metric("Active news sources", summary.activeNewsSources),
       metric("Server time", formatTime(summary.serverTime))
     ].join("");
     refreshInfo.innerHTML = '<span><strong>Server:</strong> ' + formatTime(summary.serverTime) + '</span><span><strong>Local:</strong> ' + formatTime(new Date().toISOString()) + '</span><span><strong>Refreshed:</strong> ' + new Date().toLocaleString() + '</span>';
     users.innerHTML = renderUsers(userData.users);
     routes.innerHTML = renderRoutes(routeData.routes);
-    sources.innerHTML = renderSources(sourceData.sources);
     events.innerHTML = eventData.events.map((event) => '<div class="event"><strong>' + escapeText(event.event_type) + '</strong><br>' + escapeText(event.actor) + ' - ' + escapeText(event.created_at) + '</div>').join("");
     setStatus(successMessage, "success");
   } catch (error) {
@@ -1470,14 +1447,16 @@ function renderOption(value, label, selectedValue) {
 }
 
 function renderRoutes(rows) {
-  return '<table><thead><tr><th>Country</th><th>Language</th><th>Bot URL</th><th>Active</th><th>Updated</th></tr></thead><tbody>' +
-    rows.map((row) => '<tr><td>' + escapeText(row.country) + '</td><td>' + escapeText(row.language) + '</td><td><a href="' + escapeText(row.bot_url) + '">' + escapeText(row.bot_url) + '</a></td><td>' + (row.is_active ? "yes" : "no") + '</td><td>' + escapeText(row.updated_at) + '</td></tr>').join("") +
-    '</tbody></table>';
-}
-
-function renderSources(rows) {
-  return '<table><thead><tr><th>Name</th><th>Country</th><th>Language</th><th>Type</th><th>URL</th><th>Active</th><th>Updated</th></tr></thead><tbody>' +
-    rows.map((row) => '<tr><td>' + escapeText(row.name) + '</td><td>' + escapeText(row.country) + '</td><td>' + escapeText(row.language) + '</td><td>' + escapeText(row.source_type) + '</td><td><a href="' + escapeText(row.handle_or_url) + '">' + escapeText(row.handle_or_url) + '</a></td><td>' + (row.is_active ? "yes" : "no") + '</td><td>' + escapeText(row.updated_at) + '</td></tr>').join("") +
+  return '<table class="editable-table"><thead><tr><th>Country</th><th>Language</th><th>Bot URL</th><th>Active</th><th>Updated</th><th></th><th></th></tr></thead><tbody>' +
+    rows.map((row) => '<tr>' +
+      '<td><input name="country" value="' + escapeText(row.country) + '"></td>' +
+      '<td><select name="language">' + renderOption("en", "English", row.language) + renderOption("ru", "Russian", row.language) + renderOption("he", "Hebrew", row.language) + '</select></td>' +
+      '<td><input name="botUrl" value="' + escapeText(row.bot_url) + '"></td>' +
+      '<td><label class="inline-check"><input name="isActive" type="checkbox"' + (row.is_active ? " checked" : "") + '> Active</label></td>' +
+      '<td>' + escapeText(row.updated_at) + '</td>' +
+      '<td><button type="button" data-route-action="save" data-country="' + escapeText(row.country) + '">Save</button></td>' +
+      '<td><button class="danger-button" type="button" data-route-action="delete" data-country="' + escapeText(row.country) + '">Delete</button></td>' +
+    '</tr>').join("") +
     '</tbody></table>';
 }
 
