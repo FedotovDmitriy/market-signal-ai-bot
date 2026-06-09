@@ -1000,6 +1000,7 @@ function renderAdminApp(env: Env): string {
         <h1>Admin monitoring</h1>
         <p>Private users, subscriptions and settings overview</p>
       </div>
+      <button id="themeToggle" class="theme-toggle" type="button">Dark mode</button>
     </section>
     <form id="authForm" class="panel auth-row">
       <input name="username" autocomplete="username" placeholder="Admin name">
@@ -1008,10 +1009,10 @@ function renderAdminApp(env: Env): string {
     </form>
     <section id="adminStatus" class="status" hidden></section>
     <div id="adminContent" hidden>
-      <section id="refreshInfo" class="time-strip"></section>
-      <section id="overview" class="metrics"></section>
       <section class="admin-grid">
         <div class="admin-main">
+          <section id="refreshInfo" class="time-strip"></section>
+          <section id="overview" class="metrics"></section>
           <section class="panel">
             <h2>Users</h2>
             <form id="filtersForm" class="filters-row">
@@ -1054,6 +1055,7 @@ function baseCss(): string {
   return `
 * { box-sizing: border-box; }
 body { margin: 0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif; color: #172026; background: #f5f7f8; }
+body.dark { color: #e5edf0; background: #0f1720; }
 .shell { width: min(1040px, calc(100% - 32px)); margin: 0 auto; padding: 28px 0 48px; }
 .app-shell { max-width: 560px; }
 .brand { display: flex; gap: 14px; align-items: center; margin-bottom: 22px; }
@@ -1061,14 +1063,23 @@ body { margin: 0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, S
 h1 { margin: 0; font-size: 26px; line-height: 1.15; letter-spacing: 0; }
 h2 { margin: 0 0 14px; font-size: 18px; letter-spacing: 0; }
 p { margin: 4px 0 0; color: #607077; }
+body.dark p { color: #9fb0b8; }
 .panel, .result { background: #fff; border: 1px solid #dfe7e9; border-radius: 8px; padding: 18px; box-shadow: 0 10px 30px rgba(20, 60, 60, 0.08); }
+body.dark .panel, body.dark .result { background: #17232d; border-color: #2b3b45; box-shadow: none; }
 form { display: grid; gap: 14px; }
 label { display: grid; gap: 6px; font-size: 13px; font-weight: 700; color: #34474f; }
+body.dark label, body.dark legend { color: #d7e3e7; }
 input, select { width: 100%; min-height: 44px; border: 1px solid #cad6da; border-radius: 6px; padding: 10px 12px; font: inherit; background: #fff; color: #172026; }
+body.dark input, body.dark select { background: #0f1720; border-color: #40515c; color: #e5edf0; }
 fieldset { margin: 0; border: 1px solid #cad6da; border-radius: 6px; padding: 12px; }
+body.dark fieldset { border-color: #40515c; }
 legend { padding: 0 4px; font-size: 13px; font-weight: 800; color: #34474f; }
 button { min-height: 44px; border: 0; border-radius: 6px; padding: 0 16px; font: inherit; font-weight: 800; color: #fff; background: #0f766e; cursor: pointer; }
 button:hover { background: #115e59; }
+.theme-toggle { margin-left: auto; min-height: 38px; border: 1px solid #cad6da; background: #fff; color: #172026; }
+.theme-toggle:hover { background: #eef4f5; }
+body.dark .theme-toggle { border-color: #40515c; background: #17232d; color: #e5edf0; }
+body.dark .theme-toggle:hover { background: #21313c; }
 .result { margin-top: 14px; }
 .result a { color: #0f766e; font-weight: 800; }
 .button-link { display: inline-flex; align-items: center; min-height: 42px; margin-top: 4px; border-radius: 6px; padding: 0 14px; color: #fff !important; background: #0f766e; text-decoration: none; }
@@ -1085,11 +1096,17 @@ button:hover { background: #115e59; }
 .auth-row { grid-template-columns: minmax(0, 1fr) auto; margin-bottom: 18px; }
 .auth-row { grid-template-columns: minmax(140px, 180px) minmax(180px, 1fr) auto; }
 .status { margin: 0 0 18px; border: 1px solid #cad6da; border-radius: 8px; padding: 12px 14px; background: #fff; color: #34474f; font-weight: 700; }
+body.dark .status { background: #17232d; border-color: #40515c; color: #d7e3e7; }
 .status.success { border-color: #99f6e4; background: #ecfdf5; color: #115e59; }
 .status.error { border-color: #fecaca; background: #fef2f2; color: #991b1b; }
 .status.loading { border-color: #bfdbfe; background: #eff6ff; color: #1d4ed8; }
+body.dark .status.success { border-color: #0f766e; background: #0f2f2c; color: #99f6e4; }
+body.dark .status.error { border-color: #7f1d1d; background: #2d1515; color: #fecaca; }
+body.dark .status.loading { border-color: #1d4ed8; background: #101f3d; color: #bfdbfe; }
 .time-strip { display: flex; flex-wrap: wrap; gap: 10px 18px; margin: 0 0 18px; color: #607077; font-size: 13px; }
 .time-strip strong { color: #172026; }
+body.dark .time-strip { color: #9fb0b8; }
+body.dark .time-strip strong { color: #e5edf0; }
 .filters-row { grid-template-columns: minmax(180px, 1fr) 110px 150px auto; margin-bottom: 14px; }
 .route-row { grid-template-columns: 80px 90px minmax(220px, 1fr) 110px auto; margin-bottom: 14px; }
 .inline-check { display: flex; align-items: center; gap: 8px; min-height: 44px; }
@@ -1099,11 +1116,14 @@ button:hover { background: #115e59; }
 .event-panel { position: sticky; top: 18px; max-height: calc(100vh - 36px); overflow: auto; }
 .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 18px; }
 .metric { background: #fff; border: 1px solid #dfe7e9; border-radius: 8px; padding: 16px; }
+body.dark .metric { background: #17232d; border-color: #2b3b45; }
 .metric strong { display: block; font-size: 28px; }
 .table { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid #e7edef; white-space: nowrap; }
 th { color: #607077; font-size: 12px; }
+body.dark th, body.dark td { border-bottom-color: #2b3b45; }
+body.dark th { color: #9fb0b8; }
 .editable-table input, .editable-table select { min-height: 34px; min-width: 110px; padding: 6px 8px; font-size: 13px; }
 .editable-table .email-input { min-width: 190px; }
 .editable-table .name-input { min-width: 140px; }
@@ -1112,6 +1132,7 @@ th { color: #607077; font-size: 12px; }
 .danger-button:hover { background: #991b1b; }
 .events { display: grid; gap: 8px; font-size: 13px; }
 .event { border-bottom: 1px solid #e7edef; padding: 8px 0; }
+body.dark .event { border-bottom-color: #2b3b45; }
 @media (max-width: 980px) { .admin-grid { grid-template-columns: 1fr; } .event-panel { position: static; max-height: none; } }
 @media (max-width: 860px) { .metrics, .auth-row, .filters-row, .route-row { grid-template-columns: 1fr; } }
 `;
@@ -1255,6 +1276,7 @@ boot().catch(() => {
 function adminAppScript(): string {
   return `
 const authForm = document.querySelector("#authForm");
+const themeToggle = document.querySelector("#themeToggle");
 const filtersForm = document.querySelector("#filtersForm");
 const routeForm = document.querySelector("#routeForm");
 const adminContent = document.querySelector("#adminContent");
@@ -1266,9 +1288,17 @@ const events = document.querySelector("#events");
 const routes = document.querySelector("#routes");
 let token = sessionStorage.getItem("adminToken") || "";
 let adminUser = sessionStorage.getItem("adminUser") || "";
+let theme = localStorage.getItem("adminTheme") || "light";
+applyTheme(theme);
 if (adminUser) authForm.elements.username.value = adminUser;
 if (token) authForm.elements.token.value = token;
 if (token) load();
+
+themeToggle.addEventListener("click", () => {
+  theme = document.body.classList.contains("dark") ? "light" : "dark";
+  localStorage.setItem("adminTheme", theme);
+  applyTheme(theme);
+});
 
 authForm.addEventListener("submit", (event) => {
   event.preventDefault();
@@ -1368,6 +1398,11 @@ routes.addEventListener("click", async (event) => {
     }
   }
 });
+
+function applyTheme(nextTheme) {
+  document.body.classList.toggle("dark", nextTheme === "dark");
+  themeToggle.textContent = nextTheme === "dark" ? "Light mode" : "Dark mode";
+}
 
 async function api(path, options = {}) {
   const headers = { Authorization: "Bearer " + token, "X-Admin-User": adminUser, ...(options.headers || {}) };
