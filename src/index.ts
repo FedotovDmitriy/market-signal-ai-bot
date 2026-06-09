@@ -69,9 +69,11 @@ type CountryLink = {
 };
 
 const ACTIVE_SUBSCRIPTION_STATUSES = ["trialing", "active"] as const;
-const AVAILABLE_NEWS_COUNTRIES = new Set(["IL"]);
-const PUBLIC_NEWS_COUNTRIES = new Set(["IL", "US", "RU"]);
-const COMING_SOON_NEWS_COUNTRIES = new Set(["US", "RU"]);
+const NEWS_CHAT_OPTIONS = [
+  { country: "IL", language: "he", name: "Israel news", languageName: "Hebrew", botUrl: "https://t.me/Israel_News_Ticker_Scanner_bot" },
+  { country: "US", language: "ru", name: "US news", languageName: "Russian", botUrl: "https://t.me/US_News_Ticker_Scanner_RU_bot" }
+];
+const AVAILABLE_NEWS_COUNTRIES = new Set(NEWS_CHAT_OPTIONS.map((option) => option.country));
 
 const COUNTRIES = [
   ["US", "United States"],
@@ -119,9 +121,13 @@ export default {
           defaultLocale: env.DEFAULT_LOCALE,
           defaultCountry: AVAILABLE_NEWS_COUNTRIES.has(env.DEFAULT_COUNTRY.toUpperCase()) ? env.DEFAULT_COUNTRY : "IL",
           subscriptionCheckoutUrl: env.SUBSCRIPTION_CHECKOUT_URL ?? null,
-          countries: COUNTRIES
-            .filter(([code]) => PUBLIC_NEWS_COUNTRIES.has(code))
-            .map(([code, name]) => ({ code, name, isAvailable: AVAILABLE_NEWS_COUNTRIES.has(code), isComingSoon: COMING_SOON_NEWS_COUNTRIES.has(code) })),
+          countries: NEWS_CHAT_OPTIONS.map((option) => ({
+            code: option.country,
+            name: `${option.name} (${option.languageName})`,
+            language: option.language,
+            isAvailable: true,
+            isComingSoon: false
+          })),
           languages: LANGUAGES.map(([code, name]) => ({ code, name }))
         });
       }
@@ -681,9 +687,13 @@ async function findBotUrl(env: Env, country: string): Promise<string | null> {
 async function buildCountryLinks(env: Env, countries: string[]): Promise<CountryLink[]> {
   return Promise.all(countries.map(async (country) => ({
     country,
-    botUrl: await findBotUrl(env, country),
+    botUrl: await findBotUrl(env, country) ?? findDefaultNewsChatUrl(country),
     isActive: true
   })));
+}
+
+function findDefaultNewsChatUrl(country: string): string | null {
+  return NEWS_CHAT_OPTIONS.find((option) => option.country === country)?.botUrl ?? null;
 }
 
 async function replaceCountryLinks(env: Env, userId: string, links: CountryLink[]): Promise<void> {
@@ -1207,7 +1217,7 @@ async function boot() {
     const badge = item.isComingSoon ? '<span class="dev-badge">In development</span>' : "";
     return '<label class="' + className + '"><input type="checkbox" name="countries" value="' + item.code + '"' + disabled + '> ' + item.name + badge + '</label>';
   }).join("");
-  language.value = config.defaultLocale.toLowerCase();
+  language.value = "he";
   const defaultCountry = countries.querySelector('input[value="' + config.defaultCountry.toUpperCase() + '"]');
   if (defaultCountry) defaultCountry.checked = true;
   if (currentUserId) await loadAccount(currentUserId);
@@ -1217,6 +1227,7 @@ form.addEventListener("submit", async (event) => {
   event.preventDefault();
   const data = Object.fromEntries(new FormData(form).entries());
   data.countries = [...form.querySelectorAll('input[name="countries"]:checked')].map((input) => input.value);
+  data.language = selectedPrimaryLanguage(data.countries);
   data.initData = tg?.initData || "";
   if (!data.displayName && telegramUser) data.displayName = [telegramUser.first_name, telegramUser.last_name].filter(Boolean).join(" ");
   if (!isValidEmail(data.email)) {
@@ -1297,6 +1308,12 @@ function renderAccount(links = []) {
   account.innerHTML = '<strong>Linked news chats</strong><div class="link-list">' + (links.length ? links.map((link) => (
     '<div class="link-row"><span>' + escapeText(link.country) + '</span><button type="button" data-country="' + escapeText(link.country) + '">Remove</button></div>'
   )).join("") : '<p>No linked chats.</p>') + '</div>';
+}
+
+function selectedPrimaryLanguage(countryCodes) {
+  const first = countryCodes[0];
+  const option = appConfig?.countries?.find((item) => item.code === first);
+  return option?.language || "he";
 }
 
 function isValidEmail(value) {

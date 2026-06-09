@@ -12,6 +12,13 @@ Cloudflare Worker service for Telegram WebApp onboarding, user settings, subscri
 - Provides a private admin dashboard at `/admin`.
 - Writes audit events for account, settings, and subscription activity.
 
+## Current WebApp Chat Choices
+
+The public WebApp currently allows only these news chat choices:
+
+- Israel news in Hebrew: `@Israel_News_Ticker_Scanner_bot`
+- US news in Russian: `@US_News_Ticker_Scanner_RU_bot`
+
 ## Cloudflare Setup
 
 Create a D1 database:
