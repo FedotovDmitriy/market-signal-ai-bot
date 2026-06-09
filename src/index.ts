@@ -472,12 +472,19 @@ async function setupTelegramWebApp(request: Request, env: Env): Promise<Response
 }
 
 async function adminOverview(env: Env): Promise<Response> {
-  const [users, activeSubscriptions, events, countries, botRoutes] = await Promise.all([
+  const [users, activeSubscriptions, events, countries, botRoutes, subscriptionSeries] = await Promise.all([
     env.DB.prepare("SELECT COUNT(*) AS count FROM users").first<{ count: number }>(),
     env.DB.prepare("SELECT COUNT(*) AS count FROM subscriptions WHERE status IN ('trialing', 'active')").first<{ count: number }>(),
     env.DB.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE created_at >= datetime('now', '-24 hours')").first<{ count: number }>(),
     env.DB.prepare("SELECT country, COUNT(*) AS count FROM users GROUP BY country ORDER BY count DESC LIMIT 10").all(),
-    env.DB.prepare("SELECT COUNT(*) AS count FROM bot_routes WHERE is_active = 1").first<{ count: number }>()
+    env.DB.prepare("SELECT COUNT(*) AS count FROM bot_routes WHERE is_active = 1").first<{ count: number }>(),
+    env.DB.prepare(
+      `SELECT date(created_at) AS day, COUNT(*) AS count
+       FROM subscriptions
+       WHERE created_at >= datetime('now', '-13 days')
+       GROUP BY date(created_at)
+       ORDER BY day ASC`
+    ).all<{ day: string; count: number }>()
   ]);
 
   return json({
@@ -486,12 +493,15 @@ async function adminOverview(env: Env): Promise<Response> {
     events24h: events?.count ?? 0,
     activeBotRoutes: botRoutes?.count ?? 0,
     serverTime: new Date().toISOString(),
-    countries: countries.results
+    countries: countries.results,
+    subscriptionSeries: fillDailySeries(subscriptionSeries.results)
   });
 }
 
 async function adminUsers(env: Env, url: URL): Promise<Response> {
-  const limit = Math.min(Number(url.searchParams.get("limit") ?? 50), 100);
+  const limit = Math.min(Math.max(Number(url.searchParams.get("limit") ?? 25), 1), 25);
+  const page = Math.max(Number(url.searchParams.get("page") ?? 1), 1);
+  const offset = (page - 1) * limit;
   const country = cleanString(url.searchParams.get("country"))?.toUpperCase();
   const status = cleanString(url.searchParams.get("status"));
   const search = cleanString(url.searchParams.get("search"));
@@ -510,6 +520,11 @@ async function adminUsers(env: Env, url: URL): Promise<Response> {
     params.push(`%${search}%`, `%${search}%`, `%${search}%`);
   }
   const where = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
+  const total = await env.DB.prepare(
+    `SELECT COUNT(*) AS count
+     FROM users u
+     ${where}`
+  ).bind(...params).first<{ count: number }>();
   const result = await env.DB.prepare(
     `SELECT u.*, s.plan, s.status AS subscription_status, s.current_period_end
      FROM users u
@@ -518,10 +533,20 @@ async function adminUsers(env: Env, url: URL): Promise<Response> {
      )
      ${where}
      ORDER BY u.created_at DESC
-     LIMIT ?`
-  ).bind(...params, limit).all();
+     LIMIT ? OFFSET ?`
+  ).bind(...params, limit, offset).all();
 
-  return json({ users: result.results });
+  return json({ users: result.results, pagination: { page, limit, total: total?.count ?? 0, totalPages: Math.max(Math.ceil((total?.count ?? 0) / limit), 1) } });
+}
+
+function fillDailySeries(rows: { day: string; count: number }[]): { day: string; count: number }[] {
+  const counts = new Map(rows.map((row) => [row.day, row.count]));
+  return Array.from({ length: 14 }, (_, index) => {
+    const date = new Date();
+    date.setUTCDate(date.getUTCDate() - (13 - index));
+    const day = date.toISOString().slice(0, 10);
+    return { day, count: counts.get(day) ?? 0 };
+  });
 }
 
 async function updateAdminUser(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -1014,6 +1039,10 @@ function renderAdminApp(env: Env): string {
           <section id="refreshInfo" class="time-strip"></section>
           <section id="overview" class="metrics"></section>
           <section class="panel">
+            <h2>Subscriptions</h2>
+            <div id="subscriptionChart" class="bar-chart"></div>
+          </section>
+          <section class="panel">
             <h2>Users</h2>
             <form id="filtersForm" class="filters-row">
               <input name="search" placeholder="Search email, Telegram ID, name">
@@ -1026,6 +1055,7 @@ function renderAdminApp(env: Env): string {
               <button type="submit">Filter</button>
             </form>
             <div id="users" class="table"></div>
+            <div id="usersPager" class="pager"></div>
           </section>
           <section class="panel">
             <h2>Bot routes</h2>
@@ -1058,6 +1088,7 @@ body { margin: 0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, S
 body.dark { color: #e5edf0; background: #0f1720; }
 .shell { width: min(1040px, calc(100% - 32px)); margin: 0 auto; padding: 28px 0 48px; }
 .app-shell { max-width: 560px; }
+.admin-shell { width: min(1440px, calc(100% - 48px)); }
 .brand { display: flex; gap: 14px; align-items: center; margin-bottom: 22px; }
 .mark { width: 44px; height: 44px; display: grid; place-items: center; border-radius: 8px; background: #143c3c; color: #fff; font-weight: 800; }
 h1 { margin: 0; font-size: 26px; line-height: 1.15; letter-spacing: 0; }
@@ -1111,13 +1142,22 @@ body.dark .time-strip strong { color: #e5edf0; }
 .route-row { grid-template-columns: 80px 90px minmax(220px, 1fr) 110px auto; margin-bottom: 14px; }
 .inline-check { display: flex; align-items: center; gap: 8px; min-height: 44px; }
 .inline-check input { width: 16px; min-height: 16px; }
-.admin-grid { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 18px; align-items: start; }
+.admin-grid { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 24px; align-items: start; }
 .admin-main { display: grid; gap: 18px; }
 .event-panel { position: sticky; top: 18px; max-height: calc(100vh - 36px); overflow: auto; }
 .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 18px; }
 .metric { background: #fff; border: 1px solid #dfe7e9; border-radius: 8px; padding: 16px; }
 body.dark .metric { background: #17232d; border-color: #2b3b45; }
 .metric strong { display: block; font-size: 28px; }
+.bar-chart { display: grid; grid-template-columns: repeat(14, minmax(18px, 1fr)); gap: 8px; align-items: end; min-height: 180px; }
+.bar-item { display: grid; gap: 6px; align-items: end; min-width: 0; }
+.bar-track { display: flex; align-items: end; height: 130px; border-radius: 6px; background: #edf4f5; overflow: hidden; }
+.bar-fill { width: 100%; min-height: 4px; border-radius: 6px 6px 0 0; background: #0f766e; }
+.bar-label, .bar-value { font-size: 11px; color: #607077; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bar-value { color: #172026; font-weight: 800; }
+body.dark .bar-track { background: #0f1720; }
+body.dark .bar-label { color: #9fb0b8; }
+body.dark .bar-value { color: #e5edf0; }
 .table { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid #e7edef; white-space: nowrap; }
@@ -1130,6 +1170,11 @@ body.dark th { color: #9fb0b8; }
 .editable-table button { min-height: 34px; padding: 0 10px; }
 .danger-button { background: #7f1d1d; }
 .danger-button:hover { background: #991b1b; }
+.pager { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 14px; color: #607077; font-size: 13px; }
+.pager-actions { display: flex; gap: 8px; }
+.pager button { min-height: 34px; padding: 0 12px; }
+.pager button:disabled { opacity: 0.45; cursor: not-allowed; }
+body.dark .pager { color: #9fb0b8; }
 .events { display: grid; gap: 8px; font-size: 13px; }
 .event { border-bottom: 1px solid #e7edef; padding: 8px 0; }
 body.dark .event { border-bottom-color: #2b3b45; }
@@ -1283,11 +1328,14 @@ const adminContent = document.querySelector("#adminContent");
 const adminStatus = document.querySelector("#adminStatus");
 const refreshInfo = document.querySelector("#refreshInfo");
 const overview = document.querySelector("#overview");
+const subscriptionChart = document.querySelector("#subscriptionChart");
 const users = document.querySelector("#users");
+const usersPager = document.querySelector("#usersPager");
 const events = document.querySelector("#events");
 const routes = document.querySelector("#routes");
 let token = sessionStorage.getItem("adminToken") || "";
 let adminUser = sessionStorage.getItem("adminUser") || "";
+let usersPage = 1;
 let theme = localStorage.getItem("adminTheme") || "light";
 applyTheme(theme);
 if (adminUser) authForm.elements.username.value = adminUser;
@@ -1311,6 +1359,14 @@ authForm.addEventListener("submit", (event) => {
 
 filtersForm.addEventListener("submit", (event) => {
   event.preventDefault();
+  usersPage = 1;
+  load();
+});
+
+usersPager.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-page]");
+  if (!button || button.disabled) return;
+  usersPage = Number(button.dataset.page);
   load();
 });
 
@@ -1421,10 +1477,12 @@ async function api(path, options = {}) {
 async function load(successMessage = "Admin panel loaded.") {
   setStatus("Loading admin panel...", "loading");
   try {
-    const query = new URLSearchParams(new FormData(filtersForm)).toString();
+    const query = new URLSearchParams(new FormData(filtersForm));
+    query.set("page", String(usersPage));
+    query.set("limit", "25");
     const [summary, userData, eventData, routeData] = await Promise.all([
       api("/api/admin/overview"),
-      api("/api/admin/users?" + query),
+      api("/api/admin/users?" + query.toString()),
       api("/api/admin/events"),
       api("/api/admin/bot-routes")
     ]);
@@ -1436,8 +1494,10 @@ async function load(successMessage = "Admin panel loaded.") {
       metric("Active bot routes", summary.activeBotRoutes),
       metric("Server time", formatTime(summary.serverTime))
     ].join("");
+    subscriptionChart.innerHTML = renderSubscriptionChart(summary.subscriptionSeries || []);
     refreshInfo.innerHTML = '<span><strong>Server:</strong> ' + formatTime(summary.serverTime) + '</span><span><strong>Local:</strong> ' + formatTime(new Date().toISOString()) + '</span><span><strong>Refreshed:</strong> ' + new Date().toLocaleString() + '</span>';
     users.innerHTML = renderUsers(userData.users);
+    usersPager.innerHTML = renderPager(userData.pagination);
     routes.innerHTML = renderRoutes(routeData.routes);
     events.innerHTML = eventData.events.map((event) => '<div class="event"><strong>' + escapeText(event.event_type) + '</strong><br>' + escapeText(event.actor) + ' - ' + escapeText(event.created_at) + '</div>').join("");
     setStatus(successMessage, "success");
@@ -1459,6 +1519,27 @@ function metric(label, value) {
 
 function formatTime(value) {
   return new Date(value).toLocaleString();
+}
+
+function renderSubscriptionChart(series) {
+  const max = Math.max(...series.map((item) => item.count), 1);
+  return series.map((item) => {
+    const height = Math.max((item.count / max) * 100, item.count ? 8 : 3);
+    const label = item.day.slice(5);
+    return '<div class="bar-item"><div class="bar-value">' + escapeText(item.count) + '</div><div class="bar-track"><div class="bar-fill" style="height:' + height + '%"></div></div><div class="bar-label">' + escapeText(label) + '</div></div>';
+  }).join("");
+}
+
+function renderPager(pagination) {
+  if (!pagination) return "";
+  const previousPage = Math.max(pagination.page - 1, 1);
+  const nextPage = Math.min(pagination.page + 1, pagination.totalPages);
+  const start = pagination.total ? ((pagination.page - 1) * pagination.limit) + 1 : 0;
+  const end = Math.min(pagination.page * pagination.limit, pagination.total);
+  return '<span>Showing ' + start + '-' + end + ' of ' + pagination.total + '</span><div class="pager-actions">' +
+    '<button type="button" data-page="' + previousPage + '"' + (pagination.page <= 1 ? " disabled" : "") + '>Previous</button>' +
+    '<button type="button" data-page="' + nextPage + '"' + (pagination.page >= pagination.totalPages ? " disabled" : "") + '>Next</button>' +
+    '</div>';
 }
 
 function renderUsers(rows) {
