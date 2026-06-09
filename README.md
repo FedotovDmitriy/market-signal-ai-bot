@@ -33,6 +33,7 @@ Set secrets:
 npx wrangler secret put ADMIN_TOKEN
 npx wrangler secret put SUBSCRIPTION_WEBHOOK_SECRET
 npx wrangler secret put TELEGRAM_BOT_TOKEN
+npx wrangler secret put TELEGRAM_WEBHOOK_SECRET
 ```
 
 Optional public checkout URL in `wrangler.jsonc`:
@@ -56,6 +57,33 @@ Deploy:
 npm run deploy
 ```
 
+## Telegram Web App Setup
+
+Create a bot in BotFather and set the returned token as `TELEGRAM_BOT_TOKEN`.
+
+`TELEGRAM_WEBHOOK_SECRET` is a private random string used by Telegram when it calls `/api/telegram/webhook`.
+
+After deploy, configure Telegram from the deployed Worker URL:
+
+```powershell
+$adminToken = "your-admin-token"
+$appUrl = "https://market-signal-ai-bot.your-subdomain.workers.dev"
+Invoke-RestMethod `
+  -Method Post `
+  -Uri "$appUrl/api/admin/telegram/setup" `
+  -Headers @{ Authorization = "Bearer $adminToken" } `
+  -ContentType "application/json" `
+  -Body (@{ appUrl = $appUrl } | ConvertTo-Json)
+```
+
+This setup call registers:
+
+- Telegram webhook: `/api/telegram/webhook`.
+- Bot commands: `/start` and `/app`.
+- Telegram chat menu button that opens the Web App.
+
+In BotFather, also set the bot domain to the deployed Worker host if Telegram asks for a Web App domain.
+
 ## Main URLs
 
 - `/` Telegram WebApp account setup screen.
@@ -63,6 +91,8 @@ npm run deploy
 - `/api/register` create or update user.
 - `/api/settings` update user settings.
 - `/api/subscriptions` receive external subscription event.
+- `/api/telegram/webhook` receive Telegram bot updates.
+- `/api/admin/telegram/setup` configure Telegram webhook, commands, and Web App menu button.
 - `/api/admin/overview` private summary metrics.
 - `/api/admin/users` private user list.
 - `/api/admin/events` private audit log.

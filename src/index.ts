@@ -6,6 +6,7 @@ interface Env {
   DEFAULT_COUNTRY: string;
   ADMIN_TOKEN?: string;
   TELEGRAM_BOT_TOKEN?: string;
+  TELEGRAM_WEBHOOK_SECRET?: string;
   SUBSCRIPTION_WEBHOOK_SECRET?: string;
   ALLOW_UNVERIFIED_TELEGRAM?: string;
   SUBSCRIPTION_CHECKOUT_URL?: string;
@@ -48,6 +49,15 @@ type TelegramWebAppUser = {
   last_name?: string;
   username?: string;
   language_code?: string;
+};
+
+type TelegramUpdate = {
+  update_id: number;
+  message?: {
+    chat?: { id: number | string };
+    text?: string;
+    from?: TelegramWebAppUser;
+  };
 };
 
 const ACTIVE_SUBSCRIPTION_STATUSES = ["trialing", "active"] as const;
@@ -116,6 +126,16 @@ export default {
 
       if (url.pathname === "/api/subscriptions" && request.method === "POST") {
         return withCors(await acceptSubscription(request, env, ctx));
+      }
+
+      if (url.pathname === "/api/telegram/webhook" && request.method === "POST") {
+        return withCors(await telegramWebhook(request, env, ctx));
+      }
+
+      if (url.pathname === "/api/admin/telegram/setup" && request.method === "POST") {
+        const guard = await requireAdmin(request, env);
+        if (guard) return withCors(guard);
+        return withCors(await setupTelegramWebApp(request, env));
       }
 
       if (url.pathname === "/api/admin/overview" && request.method === "GET") {
@@ -316,6 +336,69 @@ async function acceptSubscription(request: Request, env: Env, ctx: ExecutionCont
   const access = await resolveAccess(env, userId, botUrl);
 
   return json({ subscriptionId, userId, status, botUrl: access.allowed ? botUrl : null, access });
+}
+
+async function telegramWebhook(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  if (env.TELEGRAM_WEBHOOK_SECRET) {
+    const secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token");
+    if (!secret || !(await timingSafeEqual(secret, env.TELEGRAM_WEBHOOK_SECRET))) {
+      return json({ error: "unauthorized" }, 401);
+    }
+  }
+
+  const update = await readJson<TelegramUpdate>(request);
+  const chatId = update.message?.chat?.id;
+  const text = update.message?.text?.trim().toLowerCase();
+  if (!chatId || !text) return json({ ok: true });
+
+  if (text === "/start" || text === "/app") {
+    const appUrl = buildPublicAppUrl(request);
+    ctx.waitUntil(sendTelegramMessage(env, chatId, "Open Market Signal AI to create your account and unlock the country bot.", {
+      reply_markup: {
+        inline_keyboard: [[
+          { text: "Open Market Signal AI", web_app: { url: appUrl } }
+        ]]
+      }
+    }));
+  }
+
+  return json({ ok: true });
+}
+
+async function setupTelegramWebApp(request: Request, env: Env): Promise<Response> {
+  if (!env.TELEGRAM_BOT_TOKEN) return json({ error: "telegram_bot_token_not_configured" }, 503);
+
+  const body = await readOptionalJson<Record<string, unknown>>(request);
+  const appUrl = cleanString(body?.appUrl) ?? buildPublicAppUrl(request);
+  if (!/^https:\/\/.+/i.test(appUrl)) return json({ error: "https_app_url_required" }, 400);
+
+  const webhookUrl = cleanString(body?.webhookUrl) ?? `${appUrl.replace(/\/+$/, "")}/api/telegram/webhook`;
+  if (!/^https:\/\/.+/i.test(webhookUrl)) return json({ error: "https_webhook_url_required" }, 400);
+
+  const webhookPayload: Record<string, unknown> = {
+    url: webhookUrl,
+    allowed_updates: ["message"]
+  };
+  if (env.TELEGRAM_WEBHOOK_SECRET) webhookPayload.secret_token = env.TELEGRAM_WEBHOOK_SECRET;
+
+  const [webhook, commands, menuButton] = await Promise.all([
+    telegramApi(env, "setWebhook", webhookPayload),
+    telegramApi(env, "setMyCommands", {
+      commands: [
+        { command: "start", description: "Open Market Signal AI" },
+        { command: "app", description: "Open the Web App" }
+      ]
+    }),
+    telegramApi(env, "setChatMenuButton", {
+      menu_button: {
+        type: "web_app",
+        text: env.PUBLIC_APP_NAME,
+        web_app: { url: appUrl }
+      }
+    })
+  ]);
+
+  return json({ ok: true, appUrl, webhookUrl, webhook, commands, menuButton });
 }
 
 async function adminOverview(env: Env): Promise<Response> {
@@ -575,6 +658,35 @@ async function verifyTelegramInitData(initData: string, env: Env): Promise<Teleg
   }
 }
 
+function buildPublicAppUrl(request: Request): string {
+  const url = new URL(request.url);
+  return url.origin;
+}
+
+async function sendTelegramMessage(env: Env, chatId: string | number, text: string, extra: Record<string, unknown> = {}): Promise<unknown> {
+  if (!env.TELEGRAM_BOT_TOKEN) return null;
+  return telegramApi(env, "sendMessage", { chat_id: chatId, text, ...extra });
+}
+
+async function telegramApi(env: Env, method: string, payload: Record<string, unknown>): Promise<unknown> {
+  if (!env.TELEGRAM_BOT_TOKEN) throw new Error("Telegram bot token is not configured");
+
+  const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  const data = await response.json();
+  if (!response.ok || !isTelegramOk(data)) {
+    throw new Error(`Telegram ${method} failed: ${JSON.stringify(data)}`);
+  }
+  return data;
+}
+
+function isTelegramOk(value: unknown): value is { ok: true; result?: unknown } {
+  return typeof value === "object" && value !== null && (value as { ok?: unknown }).ok === true;
+}
+
 function bearerToken(request: Request): string | null {
   const header = request.headers.get("Authorization");
   if (!header?.startsWith("Bearer ")) return null;
@@ -623,6 +735,14 @@ async function readJson<T>(request: Request): Promise<T> {
   const contentType = request.headers.get("Content-Type") ?? "";
   if (!contentType.includes("application/json")) throw new Error("Expected JSON request");
   return request.json() as Promise<T>;
+}
+
+async function readOptionalJson<T>(request: Request): Promise<T | null> {
+  const contentType = request.headers.get("Content-Type") ?? "";
+  if (!contentType.includes("application/json")) return null;
+  const rawBody = await request.text();
+  if (!rawBody.trim()) return null;
+  return parseJson<T>(rawBody);
 }
 
 function parseJson<T>(rawBody: string): T {
@@ -678,7 +798,6 @@ function htmlResponse(html: string): Response {
     headers: {
       "Content-Type": "text/html; charset=utf-8",
       "Cache-Control": "no-store",
-      "X-Frame-Options": "DENY",
       "Referrer-Policy": "no-referrer",
       "Permissions-Policy": "camera=(), microphone=(), geolocation=()"
     }
