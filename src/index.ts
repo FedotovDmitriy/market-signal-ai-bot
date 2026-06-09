@@ -1142,9 +1142,10 @@ body.dark .time-strip strong { color: #e5edf0; }
 .route-row { grid-template-columns: 80px 90px minmax(220px, 1fr) 110px auto; margin-bottom: 14px; }
 .inline-check { display: flex; align-items: center; gap: 8px; min-height: 44px; }
 .inline-check input { width: 16px; min-height: 16px; }
-.admin-grid { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 24px; align-items: start; }
-.admin-main { display: grid; gap: 18px; }
-.event-panel { position: sticky; top: 18px; max-height: calc(100vh - 36px); overflow: auto; }
+.admin-grid { display: grid; grid-template-columns: minmax(0, 1fr) 340px; grid-template-areas: "main events"; gap: 24px; align-items: start; }
+.admin-main { grid-area: main; display: grid; gap: 18px; min-width: 0; }
+.admin-main > .panel, .admin-main > .metrics, .admin-main > .time-strip { min-width: 0; max-width: 100%; }
+.event-panel { grid-area: events; position: sticky; top: 18px; width: 340px; max-width: 340px; max-height: calc(100vh - 36px); overflow: auto; }
 .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 18px; }
 .metric { background: #fff; border: 1px solid #dfe7e9; border-radius: 8px; padding: 16px; }
 body.dark .metric { background: #17232d; border-color: #2b3b45; }
@@ -1158,7 +1159,7 @@ body.dark .metric { background: #17232d; border-color: #2b3b45; }
 body.dark .bar-track { background: #0f1720; }
 body.dark .bar-label { color: #9fb0b8; }
 body.dark .bar-value { color: #e5edf0; }
-.table { overflow-x: auto; }
+.table { max-width: 100%; overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid #e7edef; white-space: nowrap; }
 th { color: #607077; font-size: 12px; }
@@ -1178,7 +1179,7 @@ body.dark .pager { color: #9fb0b8; }
 .events { display: grid; gap: 8px; font-size: 13px; }
 .event { border-bottom: 1px solid #e7edef; padding: 8px 0; }
 body.dark .event { border-bottom-color: #2b3b45; }
-@media (max-width: 980px) { .admin-grid { grid-template-columns: 1fr; } .event-panel { position: static; max-height: none; } }
+@media (max-width: 980px) { .admin-grid { grid-template-columns: 1fr; grid-template-areas: "main" "events"; } .event-panel { position: static; width: auto; max-width: none; max-height: none; } }
 @media (max-width: 860px) { .metrics, .auth-row, .filters-row, .route-row { grid-template-columns: 1fr; } }
 `;
 }
