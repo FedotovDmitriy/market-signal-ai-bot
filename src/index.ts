@@ -6,6 +6,7 @@ interface Env {
   DEFAULT_COUNTRY: string;
   ADMIN_USERNAME?: string;
   ADMIN_TOKEN?: string;
+  INTERNAL_API_SECRET?: string;
   TELEGRAM_BOT_TOKEN?: string;
   TELEGRAM_WEBHOOK_SECRET?: string;
   SUBSCRIPTION_WEBHOOK_SECRET?: string;
@@ -150,6 +151,12 @@ export default {
 
       if (url.pathname === "/api/subscriptions" && request.method === "POST") {
         return withCors(await acceptSubscription(request, env, ctx));
+      }
+
+      if (url.pathname === "/api/internal/access" && request.method === "GET") {
+        const guard = await requireInternalAccess(request, env);
+        if (guard) return guard;
+        return await internalAccess(url, env);
       }
 
       if (url.pathname === "/api/telegram/webhook" && request.method === "POST") {
@@ -412,6 +419,49 @@ async function deleteCountryLink(request: Request, env: Env, ctx: ExecutionConte
   ctx.waitUntil(audit(env, userId, "user", "country_link.deleted", request, { country }));
 
   return json({ userId, removedCountry: country, countryLinks: remaining });
+}
+
+async function internalAccess(url: URL, env: Env): Promise<Response> {
+  const telegramUserId = cleanString(url.searchParams.get("telegramUserId"));
+  const country = cleanCountry(url.searchParams.get("country"), "");
+  const language = cleanInternalLanguage(url.searchParams.get("language"));
+  if (!telegramUserId) return json({ error: "telegramUserId_required" }, 400);
+  if (!country) return json({ error: "country_required" }, 400);
+  if (!language) return json({ error: "language_required" }, 400);
+
+  const allowedOption = NEWS_CHAT_OPTIONS.find((option) => option.country === country && option.language === language);
+  const user = await findUser(env, { telegramUserId });
+  if (!user) {
+    return json({
+      allowed: false,
+      reason: "user_not_found",
+      userId: "",
+      country,
+      language,
+      subscriptionStatus: null,
+      botUrl: null
+    });
+  }
+
+  const subscriptionStatus = await latestSubscriptionStatus(env, user.id);
+  const countryLink = await findCountryLink(env, user.id, country);
+  const botUrl = countryLink?.botUrl ?? await findBotUrl(env, country) ?? findDefaultNewsChatUrl(country);
+
+  let reason: string | null = null;
+  if (!allowedOption) reason = "unsupported_country_language";
+  else if (!countryLink) reason = "country_not_linked";
+  else if (!botUrl) reason = "country_bot_not_configured";
+  else if (!subscriptionStatus || !ACTIVE_SUBSCRIPTION_STATUSES.includes(subscriptionStatus as typeof ACTIVE_SUBSCRIPTION_STATUSES[number])) reason = "active_subscription_required";
+
+  return json({
+    allowed: reason === null,
+    reason,
+    userId: user.id,
+    country,
+    language,
+    subscriptionStatus,
+    botUrl: reason === null ? botUrl : null
+  });
 }
 
 async function telegramWebhook(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -720,6 +770,26 @@ async function listCountryLinks(env: Env, userId: string): Promise<CountryLink[]
   return result.results.map((row) => ({ country: row.country, botUrl: row.bot_url, isActive: Boolean(row.is_active) }));
 }
 
+async function findCountryLink(env: Env, userId: string, country: string): Promise<CountryLink | null> {
+  const row = await env.DB.prepare(
+    `SELECT country, bot_url, is_active
+     FROM user_country_links
+     WHERE user_id = ? AND country = ? AND is_active = 1`
+  ).bind(userId, country).first<{ country: string; bot_url: string | null; is_active: number }>();
+  return row ? { country: row.country, botUrl: row.bot_url, isActive: Boolean(row.is_active) } : null;
+}
+
+async function latestSubscriptionStatus(env: Env, userId: string): Promise<string | null> {
+  const row = await env.DB.prepare(
+    `SELECT status
+     FROM subscriptions
+     WHERE user_id = ?
+     ORDER BY created_at DESC
+     LIMIT 1`
+  ).bind(userId).first<{ status: string }>();
+  return row?.status ?? null;
+}
+
 async function hasActiveSubscription(env: Env, userId: string): Promise<boolean> {
   const row = await env.DB.prepare(
     `SELECT id FROM subscriptions
@@ -756,6 +826,29 @@ async function requireAdmin(request: Request, env: Env): Promise<Response | null
   if (!token || !(await timingSafeEqual(token, env.ADMIN_TOKEN))) {
     return json({ error: "unauthorized" }, 401);
   }
+  return null;
+}
+
+async function requireInternalAccess(request: Request, env: Env): Promise<Response | null> {
+  if (!env.INTERNAL_API_SECRET) return json({ error: "internal_api_secret_not_configured" }, 503);
+  const token = bearerToken(request);
+  if (token && await timingSafeEqual(token, env.INTERNAL_API_SECRET)) return null;
+
+  const timestamp = request.headers.get("X-Timestamp") ?? request.headers.get("X-Market-Signal-Timestamp");
+  const signature = request.headers.get("X-Signature") ?? request.headers.get("X-Market-Signal-Signature");
+  if (!timestamp || !signature) return json({ error: "internal_signature_required" }, 401);
+
+  const timestampMs = Number(timestamp) * 1000;
+  if (!Number.isFinite(timestampMs) || Math.abs(Date.now() - timestampMs) > 5 * 60 * 1000) {
+    return json({ error: "internal_timestamp_expired" }, 401);
+  }
+
+  const url = new URL(request.url);
+  const canonicalQuery = canonicalSearchParams(url.searchParams);
+  const expected = await hmacHex(env.INTERNAL_API_SECRET, `${timestamp}.${request.method}.${url.pathname}.${canonicalQuery}`);
+  const normalizedSignature = signature.startsWith("sha256=") ? signature.slice("sha256=".length) : signature;
+  if (!(await timingSafeEqual(normalizedSignature, expected))) return json({ error: "unauthorized" }, 401);
+
   return null;
 }
 
@@ -850,6 +943,13 @@ function bearerToken(request: Request): string | null {
   return header.slice("Bearer ".length).trim();
 }
 
+function canonicalSearchParams(params: URLSearchParams): string {
+  return [...params.entries()]
+    .sort(([leftKey, leftValue], [rightKey, rightValue]) => leftKey.localeCompare(rightKey) || leftValue.localeCompare(rightValue))
+    .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`)
+    .join("&");
+}
+
 async function timingSafeEqual(a: string, b: string): Promise<boolean> {
   const encoder = new TextEncoder();
   const left = encoder.encode(a);
@@ -933,6 +1033,11 @@ function cleanLanguage(value: unknown, fallback: string): string {
   const allowed = new Set(LANGUAGES.map(([code]) => code));
   if (!cleaned || !/^[a-z]{2,8}$/.test(cleaned) || !allowed.has(cleaned)) return allowed.has(fallback.toLowerCase()) ? fallback.toLowerCase() : "en";
   return cleaned;
+}
+
+function cleanInternalLanguage(value: unknown): string {
+  const cleaned = cleanString(value)?.toLowerCase();
+  return cleaned && /^[a-z]{2,8}$/.test(cleaned) ? cleaned : "";
 }
 
 function isValidEmail(value: string): boolean {

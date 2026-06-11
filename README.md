@@ -40,6 +40,7 @@ Set secrets:
 ```powershell
 npx wrangler secret put ADMIN_USERNAME
 npx wrangler secret put ADMIN_TOKEN
+npx wrangler secret put INTERNAL_API_SECRET
 npx wrangler secret put SUBSCRIPTION_WEBHOOK_SECRET
 npx wrangler secret put TELEGRAM_BOT_TOKEN
 npx wrangler secret put TELEGRAM_WEBHOOK_SECRET
@@ -104,6 +105,7 @@ In BotFather, also set the bot domain to the deployed Worker host if Telegram as
 - `/api/account` get account details and linked country chats.
 - `/api/account/countries` remove a linked country chat.
 - `/api/subscriptions` receive external subscription event.
+- `/api/internal/access` internal subscription/access check for service-to-service delivery decisions.
 - `/api/telegram/webhook` receive Telegram bot updates.
 - `/api/admin/telegram/setup` configure Telegram webhook, commands, and Web App menu button.
 - `/api/admin/overview` private summary metrics.
