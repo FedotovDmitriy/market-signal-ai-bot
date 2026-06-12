@@ -1,9 +1,10 @@
-interface Env {
+export interface Env {
   DB: D1Database;
   ENVIRONMENT: string;
   PUBLIC_APP_NAME: string;
   DEFAULT_LOCALE: string;
   DEFAULT_COUNTRY: string;
+  ALLOWED_ORIGINS?: string;
   ADMIN_USERNAME?: string;
   ADMIN_TOKEN?: string;
   INTERNAL_API_SECRET?: string;
@@ -69,6 +70,12 @@ type CountryLink = {
   isActive: boolean;
 };
 
+type RateLimitRule = {
+  bucket: string;
+  limit: number;
+  windowSeconds: number;
+};
+
 const ACTIVE_SUBSCRIPTION_STATUSES = ["trialing", "active"] as const;
 const NEWS_CHAT_OPTIONS = [
   { country: "IL", language: "he", name: "Israel news", languageName: "Hebrew", botUrl: "https://t.me/Israel_News_Ticker_Scanner_bot" },
@@ -101,8 +108,11 @@ export default {
 
     try {
       if (request.method === "OPTIONS") {
-        return withCors(new Response(null, { status: 204 }));
+        return withCors(request, new Response(null, { status: 204 }), env);
       }
+
+      const rateLimit = await maybeRateLimit(request, env, url);
+      if (rateLimit) return withCors(request, rateLimit, env);
 
       if (url.pathname === "/") {
         return htmlResponse(renderTelegramApp(env));
@@ -113,7 +123,7 @@ export default {
       }
 
       if (url.pathname === "/api/health" && request.method === "GET") {
-        return json({ ok: true, service: env.PUBLIC_APP_NAME, environment: env.ENVIRONMENT, deployCheck: "2026-06-08-subscription-gate" });
+        return await health(env);
       }
 
       if (url.pathname === "/api/config" && request.method === "GET") {
@@ -134,23 +144,23 @@ export default {
       }
 
       if (url.pathname === "/api/register" && request.method === "POST") {
-        return withCors(await registerUser(request, env, ctx));
+        return withCors(request, await registerUser(request, env, ctx), env);
       }
 
       if (url.pathname === "/api/settings" && request.method === "PUT") {
-        return withCors(await updateSettings(request, env, ctx));
+        return withCors(request, await updateSettings(request, env, ctx), env);
       }
 
       if (url.pathname === "/api/account" && request.method === "GET") {
-        return withCors(await accountDetails(url, env));
+        return withCors(request, await accountDetails(url, env), env);
       }
 
       if (url.pathname === "/api/account/countries" && request.method === "DELETE") {
-        return withCors(await deleteCountryLink(request, env, ctx));
+        return withCors(request, await deleteCountryLink(request, env, ctx), env);
       }
 
       if (url.pathname === "/api/subscriptions" && request.method === "POST") {
-        return withCors(await acceptSubscription(request, env, ctx));
+        return withCors(request, await acceptSubscription(request, env, ctx), env);
       }
 
       if (url.pathname === "/api/internal/access" && request.method === "GET") {
@@ -160,55 +170,55 @@ export default {
       }
 
       if (url.pathname === "/api/telegram/webhook" && request.method === "POST") {
-        return withCors(await telegramWebhook(request, env, ctx));
+        return withCors(request, await telegramWebhook(request, env, ctx), env);
       }
 
       if (url.pathname === "/api/admin/telegram/setup" && request.method === "POST") {
         const guard = await requireAdmin(request, env);
-        if (guard) return withCors(guard);
-        return withCors(await setupTelegramWebApp(request, env));
+        if (guard) return withCors(request, guard, env);
+        return withCors(request, await setupTelegramWebApp(request, env), env);
       }
 
       if (url.pathname === "/api/admin/overview" && request.method === "GET") {
         const guard = await requireAdmin(request, env);
-        if (guard) return withCors(guard);
-        return withCors(await adminOverview(env));
+        if (guard) return withCors(request, guard, env);
+        return withCors(request, await adminOverview(env), env);
       }
 
       if (url.pathname === "/api/admin/users" && request.method === "GET") {
         const guard = await requireAdmin(request, env);
-        if (guard) return withCors(guard);
-        return withCors(await adminUsers(env, url));
+        if (guard) return withCors(request, guard, env);
+        return withCors(request, await adminUsers(env, url), env);
       }
 
       if (url.pathname === "/api/admin/users" && request.method === "PUT") {
         const guard = await requireAdmin(request, env);
-        if (guard) return withCors(guard);
-        return withCors(await updateAdminUser(request, env, ctx));
+        if (guard) return withCors(request, guard, env);
+        return withCors(request, await updateAdminUser(request, env, ctx), env);
       }
 
       if (url.pathname === "/api/admin/events" && request.method === "GET") {
         const guard = await requireAdmin(request, env);
-        if (guard) return withCors(guard);
-        return withCors(await adminEvents(env));
+        if (guard) return withCors(request, guard, env);
+        return withCors(request, await adminEvents(env), env);
       }
 
       if (url.pathname === "/api/admin/bot-routes" && request.method === "GET") {
         const guard = await requireAdmin(request, env);
-        if (guard) return withCors(guard);
-        return withCors(await adminBotRoutes(env));
+        if (guard) return withCors(request, guard, env);
+        return withCors(request, await adminBotRoutes(env), env);
       }
 
       if (url.pathname === "/api/admin/bot-routes" && request.method === "PUT") {
         const guard = await requireAdmin(request, env);
-        if (guard) return withCors(guard);
-        return withCors(await upsertBotRoute(request, env, ctx));
+        if (guard) return withCors(request, guard, env);
+        return withCors(request, await upsertBotRoute(request, env, ctx), env);
       }
 
       if (url.pathname === "/api/admin/bot-routes" && request.method === "DELETE") {
         const guard = await requireAdmin(request, env);
-        if (guard) return withCors(guard);
-        return withCors(await deleteBotRoute(request, env, ctx));
+        if (guard) return withCors(request, guard, env);
+        return withCors(request, await deleteBotRoute(request, env, ctx), env);
       }
 
       return json({ error: "not_found" }, 404);
@@ -279,6 +289,66 @@ async function registerUser(request: Request, env: Env, ctx: ExecutionContext): 
   ctx.waitUntil(audit(env, userId, "user", "user.registered", request, { countries, language }));
 
   return json({ userId, botUrl: primaryBotUrl, countryLinks, access, status: "active" });
+}
+
+export async function health(env: Env): Promise<Response> {
+  const checks: Record<string, { ok: boolean; count?: number; error?: string }> = {};
+  const tableChecks = [
+    ["db", "SELECT 1 AS count"],
+    ["users", "SELECT COUNT(*) AS count FROM users"],
+    ["subscriptions", "SELECT COUNT(*) AS count FROM subscriptions"],
+    ["bot_routes", "SELECT COUNT(*) AS count FROM bot_routes"]
+  ] as const;
+
+  await Promise.all(tableChecks.map(async ([name, query]) => {
+    try {
+      const row = await env.DB.prepare(query).first<{ count: number }>();
+      checks[name] = { ok: true, count: row?.count ?? 0 };
+    } catch (error) {
+      checks[name] = { ok: false, error: String(error) };
+    }
+  }));
+
+  const ok = Object.values(checks).every((check) => check.ok);
+  return json({ ok, service: env.PUBLIC_APP_NAME, environment: env.ENVIRONMENT, deployCheck: "2026-06-08-subscription-gate", checks }, ok ? 200 : 503);
+}
+
+async function maybeRateLimit(request: Request, env: Env, url: URL): Promise<Response | null> {
+  const rule = rateLimitRuleFor(request, url);
+  if (!rule) return null;
+
+  const ip = request.headers.get("CF-Connecting-IP") ?? request.headers.get("X-Forwarded-For") ?? "unknown";
+  const now = Math.floor(Date.now() / 1000);
+  const windowStart = now - (now % rule.windowSeconds);
+  const expiresAt = windowStart + rule.windowSeconds;
+  const key = await sha256(`${rule.bucket}:${ip}:${windowStart}`);
+  const existing = await env.DB.prepare("SELECT count, window_start FROM rate_limits WHERE key = ?").bind(key).first<{ count: number; window_start: number }>();
+
+  if (existing && existing.window_start === windowStart) {
+    if (existing.count >= rule.limit) {
+      return json({ error: "rate_limited", bucket: rule.bucket, retryAfter: expiresAt - now }, 429);
+    }
+    await env.DB.prepare("UPDATE rate_limits SET count = count + 1, updated_at = CURRENT_TIMESTAMP WHERE key = ?").bind(key).run();
+    return null;
+  }
+
+  await env.DB.prepare(
+    `INSERT INTO rate_limits (key, bucket, count, window_start, expires_at, updated_at)
+     VALUES (?, ?, 1, ?, ?, CURRENT_TIMESTAMP)
+     ON CONFLICT(key) DO UPDATE SET count = 1, window_start = excluded.window_start, expires_at = excluded.expires_at, updated_at = CURRENT_TIMESTAMP`
+  ).bind(key, rule.bucket, windowStart, expiresAt).run();
+
+  await env.DB.prepare("DELETE FROM rate_limits WHERE expires_at < ?").bind(now).run();
+
+  return null;
+}
+
+function rateLimitRuleFor(request: Request, url: URL): RateLimitRule | null {
+  if (url.pathname === "/api/register" && request.method === "POST") return { bucket: "register", limit: 10, windowSeconds: 60 };
+  if (url.pathname === "/api/settings" && request.method === "PUT") return { bucket: "settings", limit: 30, windowSeconds: 60 };
+  if (url.pathname === "/api/subscriptions" && request.method === "POST") return { bucket: "subscriptions", limit: 60, windowSeconds: 60 };
+  if (url.pathname.startsWith("/api/admin/")) return { bucket: "admin", limit: 120, windowSeconds: 60 };
+  return null;
 }
 
 async function updateSettings(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -421,7 +491,7 @@ async function deleteCountryLink(request: Request, env: Env, ctx: ExecutionConte
   return json({ userId, removedCountry: country, countryLinks: remaining });
 }
 
-async function internalAccess(url: URL, env: Env): Promise<Response> {
+export async function internalAccess(url: URL, env: Env): Promise<Response> {
   const telegramUserId = cleanString(url.searchParams.get("telegramUserId"));
   const country = cleanCountry(url.searchParams.get("country"), "");
   const language = cleanInternalLanguage(url.searchParams.get("language"));
@@ -443,7 +513,8 @@ async function internalAccess(url: URL, env: Env): Promise<Response> {
     });
   }
 
-  const subscriptionStatus = await latestSubscriptionStatus(env, user.id);
+  const subscription = await latestSubscription(env, user.id);
+  const subscriptionStatus = subscription?.status ?? null;
   const countryLink = await findCountryLink(env, user.id, country);
   const botUrl = countryLink?.botUrl ?? await findBotUrl(env, country) ?? findDefaultNewsChatUrl(country);
 
@@ -451,7 +522,7 @@ async function internalAccess(url: URL, env: Env): Promise<Response> {
   if (!allowedOption) reason = "unsupported_country_language";
   else if (!countryLink) reason = "country_not_linked";
   else if (!botUrl) reason = "country_bot_not_configured";
-  else if (!subscriptionStatus || !ACTIVE_SUBSCRIPTION_STATUSES.includes(subscriptionStatus as typeof ACTIVE_SUBSCRIPTION_STATUSES[number])) reason = "active_subscription_required";
+  else if (!isSubscriptionCurrentlyAllowed(subscription)) reason = subscriptionAccessReason(subscription);
 
   return json({
     allowed: reason === null,
@@ -734,7 +805,7 @@ async function findBotUrl(env: Env, country: string): Promise<string | null> {
   return route?.bot_url ?? null;
 }
 
-async function buildCountryLinks(env: Env, countries: string[]): Promise<CountryLink[]> {
+export async function buildCountryLinks(env: Env, countries: string[]): Promise<CountryLink[]> {
   return Promise.all(countries.map(async (country) => ({
     country,
     botUrl: await findBotUrl(env, country) ?? findDefaultNewsChatUrl(country),
@@ -779,25 +850,33 @@ async function findCountryLink(env: Env, userId: string, country: string): Promi
   return row ? { country: row.country, botUrl: row.bot_url, isActive: Boolean(row.is_active) } : null;
 }
 
-async function latestSubscriptionStatus(env: Env, userId: string): Promise<string | null> {
+async function latestSubscription(env: Env, userId: string): Promise<{ status: string; currentPeriodEnd: string | null } | null> {
   const row = await env.DB.prepare(
-    `SELECT status
+    `SELECT status, current_period_end
      FROM subscriptions
      WHERE user_id = ?
      ORDER BY created_at DESC
      LIMIT 1`
-  ).bind(userId).first<{ status: string }>();
-  return row?.status ?? null;
+  ).bind(userId).first<{ status: string; current_period_end: string | null }>();
+  return row ? { status: row.status, currentPeriodEnd: row.current_period_end } : null;
+}
+
+export function isSubscriptionCurrentlyAllowed(subscription: { status: string; currentPeriodEnd: string | null } | null, now = new Date()): boolean {
+  if (!subscription || !ACTIVE_SUBSCRIPTION_STATUSES.includes(subscription.status as typeof ACTIVE_SUBSCRIPTION_STATUSES[number])) return false;
+  if (!subscription.currentPeriodEnd) return true;
+  const periodEndMs = Date.parse(subscription.currentPeriodEnd);
+  return Number.isFinite(periodEndMs) && periodEndMs > now.getTime();
+}
+
+export function subscriptionAccessReason(subscription: { status: string; currentPeriodEnd: string | null } | null, now = new Date()): string {
+  if (!subscription || !ACTIVE_SUBSCRIPTION_STATUSES.includes(subscription.status as typeof ACTIVE_SUBSCRIPTION_STATUSES[number])) return "active_subscription_required";
+  if (!subscription.currentPeriodEnd) return "active_subscription_required";
+  const periodEndMs = Date.parse(subscription.currentPeriodEnd);
+  return Number.isFinite(periodEndMs) && periodEndMs <= now.getTime() ? "subscription_period_expired" : "active_subscription_required";
 }
 
 async function hasActiveSubscription(env: Env, userId: string): Promise<boolean> {
-  const row = await env.DB.prepare(
-    `SELECT id FROM subscriptions
-     WHERE user_id = ? AND status IN (${ACTIVE_SUBSCRIPTION_STATUSES.map(() => "?").join(",")})
-     ORDER BY created_at DESC
-     LIMIT 1`
-  ).bind(userId, ...ACTIVE_SUBSCRIPTION_STATUSES).first<{ id: string }>();
-  return Boolean(row);
+  return isSubscriptionCurrentlyAllowed(await latestSubscription(env, userId));
 }
 
 async function resolveAccess(env: Env, userId: string, botUrl: string | null): Promise<{ allowed: boolean; reason: string | null; subscriptionRequired: boolean }> {
@@ -861,7 +940,7 @@ async function requireWebhookSecret(request: Request, env: Env): Promise<Respons
   return null;
 }
 
-async function requireWebhookSignature(request: Request, env: Env, rawBody: string): Promise<Response | null> {
+export async function requireWebhookSignature(request: Request, env: Env, rawBody: string): Promise<Response | null> {
   if (!env.SUBSCRIPTION_WEBHOOK_SECRET) return json({ error: "webhook_secret_not_configured" }, 503);
   const timestamp = request.headers.get("X-Timestamp") ?? request.headers.get("X-Market-Signal-Timestamp");
   const signature = request.headers.get("X-Signature") ?? request.headers.get("X-Market-Signal-Signature");
@@ -879,7 +958,7 @@ async function requireWebhookSignature(request: Request, env: Env, rawBody: stri
   return null;
 }
 
-async function verifyTelegramInitData(initData: string, env: Env): Promise<TelegramWebAppUser | null> {
+export async function verifyTelegramInitData(initData: string, env: Env): Promise<TelegramWebAppUser | null> {
   if (!env.TELEGRAM_BOT_TOKEN) return null;
 
   const params = new URLSearchParams(initData);
@@ -1018,7 +1097,7 @@ function cleanCountry(value: unknown, fallback: string): string {
   return cleaned;
 }
 
-function cleanCountries(value: unknown, legacyCountry: unknown, fallback: string): string[] {
+export function cleanCountries(value: unknown, legacyCountry: unknown, fallback: string): string[] {
   const rawValues = Array.isArray(value) ? value : [legacyCountry];
   const countries = rawValues
     .map((item) => cleanString(item)?.toUpperCase())
@@ -1067,12 +1146,29 @@ function json(data: unknown, status = 200): Response {
   });
 }
 
-function withCors(response: Response): Response {
+function withCors(request: Request, response: Response, env: Env): Response {
   const headers = new Headers(response.headers);
-  headers.set("Access-Control-Allow-Origin", "*");
+  const origin = allowedCorsOrigin(request, env);
+  if (origin) headers.set("Access-Control-Allow-Origin", origin);
+  headers.set("Vary", "Origin");
   headers.set("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS");
   headers.set("Access-Control-Allow-Headers", "Content-Type,Authorization,X-Admin-User,X-Webhook-Secret,X-Timestamp,X-Signature,X-Market-Signal-Timestamp,X-Market-Signal-Signature");
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
+
+export function allowedCorsOrigin(request: Request, env: Pick<Env, "ALLOWED_ORIGINS">): string | null {
+  const origin = request.headers.get("Origin");
+  const allowedOrigins = parseAllowedOrigins(env.ALLOWED_ORIGINS);
+  if (!allowedOrigins.length) return origin ?? "*";
+  if (!origin) return null;
+  return allowedOrigins.includes(origin) ? origin : null;
+}
+
+export function parseAllowedOrigins(value?: string): string[] {
+  return (value ?? "")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean);
 }
 
 function htmlResponse(html: string): Response {

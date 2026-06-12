@@ -7,12 +7,14 @@
     "dev": "wrangler dev --local --port 8787",
     "deploy": "wrangler deploy",
     "check": "tsc --noEmit",
+    "test": "vitest run --environment node src/index.test.ts",
     "db:apply:local": "wrangler d1 migrations apply market-signal-ai-bot-db --local",
     "db:apply:remote": "wrangler d1 migrations apply market-signal-ai-bot-db --remote"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260530.0",
     "typescript": "^5.8.3",
+    "vitest": "^3.2.4",
     "wrangler": "^4.19.1"
   }
 }

@@ -54,6 +54,14 @@ Optional public checkout URL in `wrangler.jsonc`:
 
 When this value is configured, the Telegram WebApp can send a newly registered user to your subscription checkout with `userId` appended to the URL.
 
+Optional CORS allowlist in `wrangler.jsonc`:
+
+```jsonc
+"ALLOWED_ORIGINS": "https://market-signal-ai-bot.fnemoy.workers.dev,https://your-site.example"
+```
+
+If `ALLOWED_ORIGINS` is empty, the Worker keeps wildcard CORS behavior. If it is set, only listed origins are reflected.
+
 `ADMIN_USERNAME` is optional. If it is configured, `/admin` and `/api/admin/*` require both the admin name and `ADMIN_TOKEN`.
 
 `ADMIN_TOKEN` is the private password for `/admin` and `/api/admin/*`. Rotate it with:
@@ -146,6 +154,19 @@ X-Signature: sha256=<hex_hmac_sha256>
 If `userId` is not provided, the service looks up the user by Telegram ID or email. If no user exists yet and the payload includes email or Telegram ID, the service creates a user with the provided country/language or the defaults from `wrangler.jsonc`.
 
 The response includes `botUrl` only when the subscription status is `trialing` or `active` and the selected country has an active bot route.
+
+## Operational Guards
+
+- `/api/health` checks D1 plus `users`, `subscriptions`, and `bot_routes`.
+- Rate limiting is applied to registration, settings, subscription intake, and admin API routes.
+- Internal service access uses `INTERNAL_API_SECRET` via Bearer token or HMAC.
+
+Run checks and tests:
+
+```powershell
+npm run check
+npm test
+```
 
 ## Admin Access
 
