@@ -9,8 +9,22 @@ Cloudflare Worker service for Telegram WebApp onboarding, user settings, subscri
 - Accepts subscription events from a website, payment provider, or another trusted source.
 - Returns Telegram chat links for the selected news countries.
 - Lets a returning user remove country/chat bindings from their account.
+- Provides SaaS core APIs for user dashboard, profile, subscription status, API keys, and analysis request history.
 - Provides a private admin dashboard at `/admin`.
-- Writes audit events for account, settings, and subscription activity.
+- Writes audit and API usage events for account, settings, subscription, and internal service activity.
+- Acts as the core account, subscription, access, API key, and usage service for the Market Signal AI SaaS product.
+
+## Documentation
+
+Start here:
+
+- `docs/documentation-index.md` - documentation map.
+- `docs/saas-product-architecture.md` - SaaS product and service boundaries.
+- `docs/integration-contract.md` - shared service contract and internal access check.
+- `docs/team-roles.md` - team roles and release responsibilities.
+- `docs/qa-plan.md` - QA responsibilities and regression checklist.
+- `docs/devops-cloudflare-plan.md` - Cloudflare infrastructure plan.
+- `docs/production-checklist.md` - production readiness checklist.
 
 ## Current WebApp Chat Choices
 
@@ -106,19 +120,38 @@ In BotFather, also set the bot domain to the deployed Worker host if Telegram as
 
 ## Main URLs
 
-- `/` Telegram WebApp account setup screen.
+- `/` commercial SaaS landing page.
+- `/pricing` SaaS pricing page.
+- `/signup` and `/login` account access screens.
+- `/onboarding` post-registration setup flow.
+- `/dashboard` user dashboard.
+- `/channels` country, language, and channel selection.
+- `/api-access` API access and key management screen.
+- `/ticker` ticker analysis workspace.
+- `/reports` analysis report history.
+- `/billing` subscription and billing screen.
+- `/telegram` Telegram WebApp quick account entry.
 - `/admin` private monitoring dashboard.
 - `/api/register` create or update user.
 - `/api/settings` update user settings.
 - `/api/account` get account details and linked country chats.
 - `/api/account/countries` remove a linked country chat.
+- `/api/me` get the SaaS user dashboard payload: profile, linked chats, current subscription, API keys, and recent analysis history.
+- `/api/me/profile` update profile, language, and selected countries.
+- `/api/me/subscription` list user subscription records and current access state.
+- `/api/me/api-keys` list, create, or revoke user API keys. New raw tokens are returned only once on creation.
+- `/api/me/analysis-history` list user analysis request history.
 - `/api/subscriptions` receive external subscription event.
 - `/api/internal/access` internal subscription/access check for service-to-service delivery decisions.
+- `/api/internal/analysis-requests` internal endpoint for trusted services to record analysis request history.
 - `/api/telegram/webhook` receive Telegram bot updates.
 - `/api/admin/telegram/setup` configure Telegram webhook, commands, and Web App menu button.
 - `/api/admin/overview` private summary metrics.
 - `/api/admin/users` private user list.
 - `/api/admin/events` private audit log.
+- `/api/admin/subscriptions` private subscription monitoring.
+- `/api/admin/api-usage` private API usage monitoring.
+- `/api/admin/channels` private channel and linked-user monitoring.
 
 ## Subscription Intake
 
@@ -157,8 +190,8 @@ The response includes `botUrl` only when the subscription status is `trialing` o
 
 ## Operational Guards
 
-- `/api/health` checks D1 plus `users`, `subscriptions`, and `bot_routes`.
-- Rate limiting is applied to registration, settings, subscription intake, and admin API routes.
+- `/api/health` checks D1 plus `users`, `subscriptions`, `bot_routes`, `api_keys`, and `analysis_requests`.
+- Rate limiting is applied to registration, settings, user account APIs, subscription intake, and admin API routes.
 - Internal service access uses `INTERNAL_API_SECRET` via Bearer token or HMAC.
 
 Run checks and tests:
@@ -194,7 +227,7 @@ The token needs Cloudflare Workers Scripts write and D1 write permissions for th
 
 ## Next Steps
 
-- Add Telegram init data signature verification before production launch.
-- Replace placeholder `bot_routes` URLs in the D1 table with real country chatbots.
-- Connect payment provider webhooks with signed payload verification.
-- Add news ingestion and ticker analysis workers after the account/subscription layer is stable.
+- Finalize the real `stock-signal-scanner` analysis payload shape.
+- Apply `contractVersion: "1.0"` validation in `telegram_company_matcher_app` and `stock-signal-scanner`.
+- Connect payment provider lifecycle events to subscription status and period end.
+- Complete production Cloudflare separation for dev, staging, and production.

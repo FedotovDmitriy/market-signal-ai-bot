@@ -47,6 +47,34 @@ type SubscriptionInput = {
   metadata?: Record<string, JsonValue>;
 };
 
+type ApiKeyRecord = {
+  id: string;
+  user_id: string;
+  name: string;
+  key_prefix: string;
+  scopes_json: string;
+  last_used_at: string | null;
+  expires_at: string | null;
+  is_active: number;
+  created_at: string;
+  updated_at: string;
+};
+
+type AnalysisRequestInput = {
+  userId?: string;
+  telegramUserId?: string;
+  email?: string;
+  apiKeyId?: string;
+  requestId?: string;
+  source?: string;
+  country?: string;
+  language?: string;
+  status?: string;
+  tickers?: unknown[];
+  request?: Record<string, JsonValue>;
+  response?: Record<string, JsonValue>;
+};
+
 type TelegramWebAppUser = {
   id: number;
   first_name?: string;
@@ -114,7 +142,12 @@ export default {
       const rateLimit = await maybeRateLimit(request, env, url);
       if (rateLimit) return withCors(request, rateLimit, env);
 
-      if (url.pathname === "/") {
+      const marketingPage = pageForPath(url.pathname);
+      if (marketingPage) {
+        return htmlResponse(renderSaasPage(env, marketingPage));
+      }
+
+      if (url.pathname === "/telegram") {
         return htmlResponse(renderTelegramApp(env));
       }
 
@@ -159,6 +192,34 @@ export default {
         return withCors(request, await deleteCountryLink(request, env, ctx), env);
       }
 
+      if (url.pathname === "/api/me" && request.method === "GET") {
+        return withCors(request, await userDashboard(url, env), env);
+      }
+
+      if (url.pathname === "/api/me/profile" && request.method === "PUT") {
+        return withCors(request, await updateUserProfile(request, env, ctx), env);
+      }
+
+      if (url.pathname === "/api/me/subscription" && request.method === "GET") {
+        return withCors(request, await userSubscription(url, env), env);
+      }
+
+      if (url.pathname === "/api/me/api-keys" && request.method === "GET") {
+        return withCors(request, await userApiKeys(url, env), env);
+      }
+
+      if (url.pathname === "/api/me/api-keys" && request.method === "POST") {
+        return withCors(request, await createUserApiKey(request, env, ctx), env);
+      }
+
+      if (url.pathname === "/api/me/api-keys" && request.method === "DELETE") {
+        return withCors(request, await revokeUserApiKey(request, env, ctx), env);
+      }
+
+      if (url.pathname === "/api/me/analysis-history" && request.method === "GET") {
+        return withCors(request, await userAnalysisHistory(url, env), env);
+      }
+
       if (url.pathname === "/api/subscriptions" && request.method === "POST") {
         return withCors(request, await acceptSubscription(request, env, ctx), env);
       }
@@ -167,6 +228,12 @@ export default {
         const guard = await requireInternalAccess(request, env);
         if (guard) return guard;
         return await internalAccess(url, env);
+      }
+
+      if (url.pathname === "/api/internal/analysis-requests" && request.method === "POST") {
+        const guard = await requireInternalAccess(request, env);
+        if (guard) return guard;
+        return withCors(request, await recordAnalysisRequest(request, env, ctx), env);
       }
 
       if (url.pathname === "/api/telegram/webhook" && request.method === "POST") {
@@ -201,6 +268,24 @@ export default {
         const guard = await requireAdmin(request, env);
         if (guard) return withCors(request, guard, env);
         return withCors(request, await adminEvents(env), env);
+      }
+
+      if (url.pathname === "/api/admin/subscriptions" && request.method === "GET") {
+        const guard = await requireAdmin(request, env);
+        if (guard) return withCors(request, guard, env);
+        return withCors(request, await adminSubscriptions(env, url), env);
+      }
+
+      if (url.pathname === "/api/admin/api-usage" && request.method === "GET") {
+        const guard = await requireAdmin(request, env);
+        if (guard) return withCors(request, guard, env);
+        return withCors(request, await adminApiUsage(env, url), env);
+      }
+
+      if (url.pathname === "/api/admin/channels" && request.method === "GET") {
+        const guard = await requireAdmin(request, env);
+        if (guard) return withCors(request, guard, env);
+        return withCors(request, await adminChannels(env), env);
       }
 
       if (url.pathname === "/api/admin/bot-routes" && request.method === "GET") {
@@ -297,7 +382,9 @@ export async function health(env: Env): Promise<Response> {
     ["db", "SELECT 1 AS count"],
     ["users", "SELECT COUNT(*) AS count FROM users"],
     ["subscriptions", "SELECT COUNT(*) AS count FROM subscriptions"],
-    ["bot_routes", "SELECT COUNT(*) AS count FROM bot_routes"]
+    ["bot_routes", "SELECT COUNT(*) AS count FROM bot_routes"],
+    ["api_keys", "SELECT COUNT(*) AS count FROM api_keys"],
+    ["analysis_requests", "SELECT COUNT(*) AS count FROM analysis_requests"]
   ] as const;
 
   await Promise.all(tableChecks.map(async ([name, query]) => {
@@ -346,6 +433,7 @@ async function maybeRateLimit(request: Request, env: Env, url: URL): Promise<Res
 function rateLimitRuleFor(request: Request, url: URL): RateLimitRule | null {
   if (url.pathname === "/api/register" && request.method === "POST") return { bucket: "register", limit: 10, windowSeconds: 60 };
   if (url.pathname === "/api/settings" && request.method === "PUT") return { bucket: "settings", limit: 30, windowSeconds: 60 };
+  if (url.pathname.startsWith("/api/me/") || url.pathname === "/api/me") return { bucket: "account", limit: 60, windowSeconds: 60 };
   if (url.pathname === "/api/subscriptions" && request.method === "POST") return { bucket: "subscriptions", limit: 60, windowSeconds: 60 };
   if (url.pathname.startsWith("/api/admin/")) return { bucket: "admin", limit: 120, windowSeconds: 60 };
   return null;
@@ -491,6 +579,208 @@ async function deleteCountryLink(request: Request, env: Env, ctx: ExecutionConte
   return json({ userId, removedCountry: country, countryLinks: remaining });
 }
 
+async function userDashboard(url: URL, env: Env): Promise<Response> {
+  const user = await resolveUserFromUrl(url, env);
+  if (!user) return json({ error: "user_not_found" }, 404);
+
+  const [countryLinks, subscription, apiKeys, history] = await Promise.all([
+    listCountryLinks(env, user.id),
+    latestSubscription(env, user.id),
+    listApiKeys(env, user.id),
+    listAnalysisHistory(env, user.id, 10)
+  ]);
+
+  return json({
+    user,
+    countryLinks,
+    subscription,
+    apiKeys,
+    analysisHistory: history,
+    access: await resolveAccess(env, user.id, countryLinks[0]?.botUrl ?? user.selected_bot_url)
+  });
+}
+
+async function updateUserProfile(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const body = await readJson<Record<string, unknown>>(request);
+  const userId = cleanString(body.userId);
+  if (!userId) return json({ error: "userId_required" }, 400);
+
+  const existing = await findUserById(env, userId);
+  if (!existing) return json({ error: "user_not_found" }, 404);
+
+  const emailInput = cleanString(body.email);
+  const email = emailInput ? emailInput.toLowerCase() : existing.email;
+  if (email && !isValidEmail(email)) return json({ error: "valid_email_required" }, 400);
+
+  const displayName = cleanString(body.displayName) ?? existing.display_name;
+  const language = cleanLanguage(body.language, existing.language);
+  const countries = cleanCountries(body.countries, body.country, existing.country);
+  const countryLinks = await buildCountryLinks(env, countries);
+  const primary = countryLinks[0];
+
+  await env.DB.prepare(
+    `UPDATE users
+     SET email = ?,
+         display_name = ?,
+         language = ?,
+         country = ?,
+         selected_bot_url = ?,
+         updated_at = CURRENT_TIMESTAMP,
+         last_seen_at = CURRENT_TIMESTAMP
+     WHERE id = ?`
+  ).bind(email, displayName, language, primary.country, primary.botUrl, userId).run();
+
+  await env.DB.prepare(
+    `INSERT INTO user_settings (user_id, language, country)
+     VALUES (?, ?, ?)
+     ON CONFLICT(user_id) DO UPDATE SET language = excluded.language, country = excluded.country, updated_at = CURRENT_TIMESTAMP`
+  ).bind(userId, language, primary.country).run();
+
+  await replaceCountryLinks(env, userId, countryLinks);
+  ctx.waitUntil(audit(env, userId, "user", "profile.updated", request, { countries, language }));
+
+  const user = await findUserById(env, userId);
+  return json({ user, countryLinks, subscription: await latestSubscription(env, userId) });
+}
+
+async function userSubscription(url: URL, env: Env): Promise<Response> {
+  const user = await resolveUserFromUrl(url, env);
+  if (!user) return json({ error: "user_not_found" }, 404);
+
+  const result = await env.DB.prepare(
+    `SELECT id, provider, external_id, plan, status, current_period_end, created_at, updated_at
+     FROM subscriptions
+     WHERE user_id = ?
+     ORDER BY created_at DESC
+     LIMIT 20`
+  ).bind(user.id).all();
+
+  const current = await latestSubscription(env, user.id);
+  return json({
+    userId: user.id,
+    current,
+    allowed: isSubscriptionCurrentlyAllowed(current),
+    subscriptions: result.results
+  });
+}
+
+async function userApiKeys(url: URL, env: Env): Promise<Response> {
+  const user = await resolveUserFromUrl(url, env);
+  if (!user) return json({ error: "user_not_found" }, 404);
+  return json({ userId: user.id, apiKeys: await listApiKeys(env, user.id) });
+}
+
+async function createUserApiKey(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const body = await readJson<Record<string, unknown>>(request);
+  const userId = cleanString(body.userId);
+  if (!userId) return json({ error: "userId_required" }, 400);
+
+  const user = await findUserById(env, userId);
+  if (!user) return json({ error: "user_not_found" }, 404);
+  if (user.status !== "active") return json({ error: "user_not_active" }, 403);
+
+  const name = cleanString(body.name) ?? "Default key";
+  const scopes = Array.isArray(body.scopes) ? body.scopes.map(cleanString).filter(isString).slice(0, 20) : ["analysis:read", "analysis:write"];
+  const expiresAt = cleanString(body.expiresAt);
+  const rawKey = `msk_live_${randomSecret(32)}`;
+  const keyId = crypto.randomUUID();
+  const keyPrefix = rawKey.slice(0, 18);
+  const keyHash = await sha256(rawKey);
+
+  await env.DB.prepare(
+    `INSERT INTO api_keys (id, user_id, name, key_prefix, key_hash, scopes_json, expires_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
+  ).bind(keyId, userId, name, keyPrefix, keyHash, JSON.stringify(scopes), expiresAt).run();
+
+  ctx.waitUntil(audit(env, userId, "user", "api_key.created", request, { keyId, keyPrefix, name }));
+
+  return json({
+    apiKey: {
+      id: keyId,
+      name,
+      keyPrefix,
+      scopes,
+      expiresAt,
+      isActive: true,
+      token: rawKey
+    },
+    warning: "Store this token now. It will not be shown again."
+  }, 201);
+}
+
+async function revokeUserApiKey(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const body = await readJson<Record<string, unknown>>(request);
+  const userId = cleanString(body.userId);
+  const keyId = cleanString(body.keyId);
+  if (!userId) return json({ error: "userId_required" }, 400);
+  if (!keyId) return json({ error: "keyId_required" }, 400);
+
+  await env.DB.prepare(
+    `UPDATE api_keys
+     SET is_active = 0, updated_at = CURRENT_TIMESTAMP
+     WHERE id = ? AND user_id = ?`
+  ).bind(keyId, userId).run();
+
+  ctx.waitUntil(audit(env, userId, "user", "api_key.revoked", request, { keyId }));
+  return json({ userId, keyId, revoked: true, apiKeys: await listApiKeys(env, userId) });
+}
+
+async function userAnalysisHistory(url: URL, env: Env): Promise<Response> {
+  const user = await resolveUserFromUrl(url, env);
+  if (!user) return json({ error: "user_not_found" }, 404);
+  const limit = Math.min(Math.max(Number(url.searchParams.get("limit") ?? 25), 1), 100);
+  return json({ userId: user.id, analysisHistory: await listAnalysisHistory(env, user.id, limit) });
+}
+
+async function recordAnalysisRequest(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const body = await readJson<AnalysisRequestInput>(request);
+  let userId = cleanString(body.userId);
+  if (!userId) {
+    const user = await findUser(env, {
+      telegramUserId: cleanString(body.telegramUserId),
+      email: cleanString(body.email)?.toLowerCase() ?? null
+    });
+    userId = user?.id ?? null;
+  }
+
+  const requestId = cleanString(body.requestId) ?? crypto.randomUUID();
+  const source = cleanString(body.source) ?? "internal";
+  const country = cleanCountry(body.country, "");
+  const language = cleanInternalLanguage(body.language);
+  const status = cleanEnum(body.status, ["received", "processing", "sent", "failed"], "received");
+  const tickers = Array.isArray(body.tickers) ? body.tickers.slice(0, 100) : [];
+  const apiKeyId = cleanString(body.apiKeyId);
+  const id = crypto.randomUUID();
+
+  await env.DB.prepare(
+    `INSERT INTO analysis_requests (id, user_id, api_key_id, request_id, source, country, language, status, tickers_json, request_json, response_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(request_id) DO UPDATE SET
+       status = excluded.status,
+       tickers_json = excluded.tickers_json,
+       request_json = excluded.request_json,
+       response_json = excluded.response_json,
+       updated_at = CURRENT_TIMESTAMP`
+  ).bind(
+    id,
+    userId ?? null,
+    apiKeyId,
+    requestId,
+    source,
+    country || null,
+    language || null,
+    status,
+    JSON.stringify(tickers),
+    JSON.stringify(body.request ?? {}),
+    JSON.stringify(body.response ?? {})
+  ).run();
+
+  await recordApiUsage(env, { userId: userId ?? null, apiKeyId, endpoint: "internal.analysis-requests" });
+  ctx.waitUntil(audit(env, userId ?? null, source, "analysis_request.recorded", request, { requestId, status, country, language }));
+
+  return json({ id, requestId, userId: userId ?? null, status });
+}
+
 export async function internalAccess(url: URL, env: Env): Promise<Response> {
   const telegramUserId = cleanString(url.searchParams.get("telegramUserId"));
   const country = cleanCountry(url.searchParams.get("country"), "");
@@ -523,6 +813,8 @@ export async function internalAccess(url: URL, env: Env): Promise<Response> {
   else if (!countryLink) reason = "country_not_linked";
   else if (!botUrl) reason = "country_bot_not_configured";
   else if (!isSubscriptionCurrentlyAllowed(subscription)) reason = subscriptionAccessReason(subscription);
+
+  await recordApiUsage(env, { userId: user.id, endpoint: "internal.access" });
 
   return json({
     allowed: reason === null,
@@ -732,6 +1024,61 @@ async function adminEvents(env: Env): Promise<Response> {
   return json({ events: result.results });
 }
 
+async function adminSubscriptions(env: Env, url: URL): Promise<Response> {
+  const limit = Math.min(Math.max(Number(url.searchParams.get("limit") ?? 50), 1), 100);
+  const result = await env.DB.prepare(
+    `SELECT s.id, s.user_id, u.email, u.display_name, s.provider, s.external_id, s.plan, s.status, s.current_period_end, s.created_at
+     FROM subscriptions s
+     LEFT JOIN users u ON u.id = s.user_id
+     ORDER BY s.created_at DESC
+     LIMIT ?`
+  ).bind(limit).all();
+
+  return json({ subscriptions: result.results });
+}
+
+async function adminApiUsage(env: Env, url: URL): Promise<Response> {
+  const days = Math.min(Math.max(Number(url.searchParams.get("days") ?? 14), 1), 90);
+  const [series, topEndpoints, activeKeys, recentRequests] = await Promise.all([
+    env.DB.prepare(
+      `SELECT day, SUM(count) AS count
+       FROM api_usage_daily
+       WHERE day >= date('now', ?)
+       GROUP BY day
+       ORDER BY day ASC`
+    ).bind(`-${days - 1} days`).all<{ day: string; count: number }>(),
+    env.DB.prepare(
+      `SELECT endpoint, SUM(count) AS count
+       FROM api_usage_daily
+       WHERE day >= date('now', ?)
+       GROUP BY endpoint
+       ORDER BY count DESC
+       LIMIT 10`
+    ).bind(`-${days - 1} days`).all(),
+    env.DB.prepare("SELECT COUNT(*) AS count FROM api_keys WHERE is_active = 1").first<{ count: number }>(),
+    env.DB.prepare("SELECT COUNT(*) AS count FROM analysis_requests WHERE created_at >= datetime('now', '-24 hours')").first<{ count: number }>()
+  ]);
+
+  return json({
+    activeApiKeys: activeKeys?.count ?? 0,
+    analysisRequests24h: recentRequests?.count ?? 0,
+    usageSeries: fillUsageSeries(series.results, days),
+    topEndpoints: topEndpoints.results
+  });
+}
+
+async function adminChannels(env: Env): Promise<Response> {
+  const routes = await env.DB.prepare(
+    `SELECT br.country, br.language, br.bot_url, br.is_active, COUNT(ucl.user_id) AS linked_users
+     FROM bot_routes br
+     LEFT JOIN user_country_links ucl ON ucl.country = br.country AND ucl.is_active = 1
+     GROUP BY br.country, br.language, br.bot_url, br.is_active
+     ORDER BY br.country ASC`
+  ).all();
+
+  return json({ channels: routes.results });
+}
+
 async function adminBotRoutes(env: Env): Promise<Response> {
   const result = await env.DB.prepare(
     `SELECT country, language, bot_url, is_active, created_at, updated_at
@@ -798,6 +1145,80 @@ async function findUser(env: Env, input: { telegramUserId?: string | null; email
 
 async function findUserById(env: Env, userId: string): Promise<AppUser | null> {
   return env.DB.prepare("SELECT * FROM users WHERE id = ?").bind(userId).first<AppUser>();
+}
+
+async function resolveUserFromUrl(url: URL, env: Env): Promise<AppUser | null> {
+  const userId = cleanString(url.searchParams.get("userId"));
+  const email = cleanString(url.searchParams.get("email"))?.toLowerCase() ?? null;
+  const telegramUserId = cleanString(url.searchParams.get("telegramUserId"));
+  if (email && !isValidEmail(email)) return null;
+  return userId ? findUserById(env, userId) : findUser(env, { telegramUserId, email });
+}
+
+async function listApiKeys(env: Env, userId: string): Promise<Array<Record<string, JsonValue>>> {
+  const result = await env.DB.prepare(
+    `SELECT id, user_id, name, key_prefix, scopes_json, last_used_at, expires_at, is_active, created_at, updated_at
+     FROM api_keys
+     WHERE user_id = ?
+     ORDER BY created_at DESC`
+  ).bind(userId).all<ApiKeyRecord>();
+
+  return result.results.map((key) => ({
+    id: key.id,
+    userId: key.user_id,
+    name: key.name,
+    keyPrefix: key.key_prefix,
+    scopes: parseJsonSafe<JsonValue[]>(key.scopes_json, []),
+    lastUsedAt: key.last_used_at,
+    expiresAt: key.expires_at,
+    isActive: Boolean(key.is_active),
+    createdAt: key.created_at,
+    updatedAt: key.updated_at
+  }));
+}
+
+async function listAnalysisHistory(env: Env, userId: string, limit: number): Promise<Array<Record<string, JsonValue>>> {
+  const result = await env.DB.prepare(
+    `SELECT id, request_id, source, country, language, status, tickers_json, response_json, created_at, updated_at
+     FROM analysis_requests
+     WHERE user_id = ?
+     ORDER BY created_at DESC
+     LIMIT ?`
+  ).bind(userId, limit).all<{
+    id: string;
+    request_id: string | null;
+    source: string;
+    country: string | null;
+    language: string | null;
+    status: string;
+    tickers_json: string;
+    response_json: string;
+    created_at: string;
+    updated_at: string;
+  }>();
+
+  return result.results.map((row) => ({
+    id: row.id,
+    requestId: row.request_id,
+    source: row.source,
+    country: row.country,
+    language: row.language,
+    status: row.status,
+    tickers: parseJsonSafe<JsonValue[]>(row.tickers_json, []),
+    response: parseJsonSafe<Record<string, JsonValue>>(row.response_json, {}),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  }));
+}
+
+async function recordApiUsage(env: Env, input: { userId: string | null; apiKeyId?: string | null; endpoint: string }): Promise<void> {
+  const day = new Date().toISOString().slice(0, 10);
+  const id = await sha256(`${day}:${input.userId ?? "anonymous"}:${input.apiKeyId ?? "none"}:${input.endpoint}`);
+  await env.DB.prepare(
+    `INSERT INTO api_usage_daily (id, day, user_id, api_key_id, endpoint, count, updated_at)
+     VALUES (?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP)
+     ON CONFLICT(id) DO UPDATE SET count = count + 1, updated_at = CURRENT_TIMESTAMP`
+  ).bind(id, day, input.userId, input.apiKeyId ?? null, input.endpoint).run();
 }
 
 async function findBotUrl(env: Env, country: string): Promise<string | null> {
@@ -1085,6 +1506,32 @@ function parseJson<T>(rawBody: string): T {
   return JSON.parse(rawBody) as T;
 }
 
+function parseJsonSafe<T>(rawBody: string, fallback: T): T {
+  try {
+    return JSON.parse(rawBody) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+function randomSecret(byteLength: number): string {
+  const bytes = new Uint8Array(byteLength);
+  crypto.getRandomValues(bytes);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function fillUsageSeries(rows: Array<{ day: string; count: number }>, days: number): Array<{ day: string; count: number }> {
+  const byDay = new Map(rows.map((row) => [row.day, Number(row.count) || 0]));
+  return Array.from({ length: days }, (_, index) => {
+    const date = new Date();
+    date.setUTCDate(date.getUTCDate() - (days - index - 1));
+    const day = date.toISOString().slice(0, 10);
+    return { day, count: byDay.get(day) ?? 0 };
+  });
+}
+
 function cleanString(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const cleaned = value.trim();
@@ -1182,6 +1629,267 @@ function htmlResponse(html: string): Response {
   });
 }
 
+type SaasPage =
+  | "landing"
+  | "pricing"
+  | "auth"
+  | "onboarding"
+  | "dashboard"
+  | "channels"
+  | "api"
+  | "ticker"
+  | "reports"
+  | "billing";
+
+function pageForPath(pathname: string): SaasPage | null {
+  const routes: Record<string, SaasPage> = {
+    "/": "landing",
+    "/pricing": "pricing",
+    "/login": "auth",
+    "/signup": "auth",
+    "/onboarding": "onboarding",
+    "/dashboard": "dashboard",
+    "/channels": "channels",
+    "/api-access": "api",
+    "/ticker": "ticker",
+    "/reports": "reports",
+    "/billing": "billing"
+  };
+  return routes[pathname] ?? null;
+}
+
+function renderSaasPage(env: Env, page: SaasPage): string {
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${escapeHtml(pageTitle(env, page))}</title>
+  <style>${baseCss()}${saasCss()}</style>
+</head>
+<body class="saas-body">
+  <header class="topbar">
+    <a class="logo" href="/"><span class="mark">MS</span><span>${escapeHtml(env.PUBLIC_APP_NAME)}</span></a>
+    <nav>
+      <a href="/pricing">Pricing</a>
+      <a href="/ticker">Ticker analysis</a>
+      <a href="/api-access">API</a>
+      <a href="/telegram">Telegram entry</a>
+      <a class="nav-cta" href="/signup">Start trial</a>
+    </nav>
+  </header>
+  ${page === "landing" ? renderLanding() : ""}
+  ${page === "pricing" ? renderPricing() : ""}
+  ${page === "auth" ? renderAuth() : ""}
+  ${page === "onboarding" ? renderOnboarding() : ""}
+  ${page === "dashboard" ? renderDashboard() : ""}
+  ${page === "channels" ? renderChannels() : ""}
+  ${page === "api" ? renderApiAccess() : ""}
+  ${page === "ticker" ? renderTickerAnalysis() : ""}
+  ${page === "reports" ? renderReports() : ""}
+  ${page === "billing" ? renderBilling() : ""}
+  <script>${saasScript()}</script>
+</body>
+</html>`;
+}
+
+function pageTitle(env: Env, page: SaasPage): string {
+  const labels: Record<SaasPage, string> = {
+    landing: env.PUBLIC_APP_NAME,
+    pricing: `Pricing - ${env.PUBLIC_APP_NAME}`,
+    auth: `Sign in - ${env.PUBLIC_APP_NAME}`,
+    onboarding: `Onboarding - ${env.PUBLIC_APP_NAME}`,
+    dashboard: `Dashboard - ${env.PUBLIC_APP_NAME}`,
+    channels: `Countries and channels - ${env.PUBLIC_APP_NAME}`,
+    api: `API access - ${env.PUBLIC_APP_NAME}`,
+    ticker: `Ticker analysis - ${env.PUBLIC_APP_NAME}`,
+    reports: `Reports - ${env.PUBLIC_APP_NAME}`,
+    billing: `Billing - ${env.PUBLIC_APP_NAME}`
+  };
+  return labels[page];
+}
+
+function renderLanding(): string {
+  return `<main class="saas-shell">
+    <section class="hero-band">
+      <div class="hero-copy">
+        <p class="eyebrow">Commercial market intelligence SaaS</p>
+        <h1>Market Signal AI</h1>
+        <p class="hero-text">News-aware ticker analysis, country feeds, Telegram delivery, API access, and operator monitoring in one subscription product.</p>
+        <div class="hero-actions">
+          <a class="primary-action" href="/signup">Start trial</a>
+          <a class="secondary-action" href="/dashboard">View dashboard</a>
+        </div>
+      </div>
+      <div class="product-visual" aria-label="Market Signal AI product preview">
+        <div class="terminal-panel">
+          <div class="terminal-head"><span>Live scan</span><strong>US / IL</strong></div>
+          <div class="signal-line up"><span>NVDA</span><strong>+1.8%</strong><em>AI supply-chain headline cluster</em></div>
+          <div class="signal-line warn"><span>OIL</span><strong>-0.7%</strong><em>Policy risk update</em></div>
+          <div class="signal-line up"><span>TA35</span><strong>+0.5%</strong><em>Local banking flow improving</em></div>
+        </div>
+        <div class="chart-panel"><span></span><span></span><span></span><span></span><span></span><span></span></div>
+      </div>
+    </section>
+    <section class="feature-grid">
+      ${feature("Signal workflow", "Convert news into ticker watchlists, country routes, and report history.")}
+      ${feature("Subscriber access", "Gate Telegram channels, API keys, and country bots behind active plans.")}
+      ${feature("Admin monitoring", "Track users, subscriptions, events, bot routes, and operational health.")}
+    </section>
+  </main>`;
+}
+
+function renderPricing(): string {
+  return `<main class="saas-shell page-stack">
+    <section class="page-heading"><p class="eyebrow">Pricing</p><h1>Plans for signal teams</h1><p>Start with Telegram delivery, then add API access and deeper report automation as volume grows.</p></section>
+    <section class="pricing-grid">
+      ${plan("Starter", "$29", ["2 country feeds", "Telegram WebApp account control", "Ticker report history"], "Start trial")}
+      ${plan("Pro", "$79", ["10 country feeds", "API key access", "Priority ticker analysis", "Billing controls"], "Choose Pro", true)}
+      ${plan("Desk", "Custom", ["Multiple operators", "Admin monitoring", "Webhook integrations", "Custom bot routes"], "Contact sales")}
+    </section>
+  </main>`;
+}
+
+function renderAuth(): string {
+  return `<main class="auth-layout">
+    <section class="auth-copy"><p class="eyebrow">Welcome back</p><h1>Sign in to manage market signals</h1><p>Use email for the full SaaS workspace. Telegram remains a quick account and delivery control surface.</p></section>
+    <form class="panel auth-card">
+      <label>Email<input type="email" placeholder="you@company.com" autocomplete="email"></label>
+      <label>Password<input type="password" placeholder="Password" autocomplete="current-password"></label>
+      <button type="button" data-demo-login>Continue</button>
+      <a href="/onboarding">Create an account instead</a>
+    </form>
+  </main>`;
+}
+
+function renderOnboarding(): string {
+  return `<main class="app-layout">${appSidebar("onboarding")}<section class="workspace">
+    <div class="page-heading compact"><p class="eyebrow">Onboarding</p><h1>Set up your signal workspace</h1></div>
+    <div class="step-grid">
+      ${step("1", "Choose markets", "Pick countries, languages, and delivery channels.")}
+      ${step("2", "Connect Telegram", "Use Telegram as fast entry, not the main product surface.")}
+      ${step("3", "Activate plan", "Unlock reports, API access, and bot routes.")}
+    </div>
+    <section class="panel form-surface">
+      <label>Workspace name<input value="Market Desk"></label>
+      <label>Primary use case<select><option>Trading desk monitoring</option><option>Investor research</option><option>News intelligence API</option></select></label>
+      <a class="primary-action inline-action" href="/dashboard">Finish setup</a>
+    </section>
+  </section></main>`;
+}
+
+function renderDashboard(): string {
+  return `<main class="app-layout">${appSidebar("dashboard")}<section class="workspace">
+    <div class="workspace-head"><div><p class="eyebrow">Dashboard</p><h1>Today's market signal board</h1></div><a class="primary-action" href="/ticker">Analyze ticker</a></div>
+    <section class="metrics product-metrics">
+      ${metricCard("Active feeds", "2", "Israel, US")}
+      ${metricCard("Reports generated", "128", "+18 this week")}
+      ${metricCard("API calls", "14.2k", "72% quota")}
+      ${metricCard("Telegram users", "341", "active subscribers")}
+    </section>
+    <section class="dashboard-grid">
+      <div class="panel"><h2>Signal queue</h2>${signalRows()}</div>
+      <div class="panel"><h2>News heat</h2><div class="heat-list"><span style="width:88%">AI infrastructure</span><span style="width:64%">Central banks</span><span style="width:52%">Energy policy</span></div></div>
+    </section>
+  </section></main>`;
+}
+
+function renderChannels(): string {
+  return `<main class="app-layout">${appSidebar("channels")}<section class="workspace">
+    <div class="page-heading compact"><p class="eyebrow">Countries, languages, channels</p><h1>Route signals by market</h1></div>
+    <section class="channel-grid">
+      ${channel("Israel", "Hebrew", "Telegram + API", "Active")}
+      ${channel("United States", "Russian", "Telegram + API", "Active")}
+      ${channel("United Kingdom", "English", "API only", "Draft")}
+      ${channel("Germany", "German", "Telegram pending", "Planned")}
+    </section>
+  </section></main>`;
+}
+
+function renderApiAccess(): string {
+  return `<main class="app-layout">${appSidebar("api")}<section class="workspace">
+    <div class="workspace-head"><div><p class="eyebrow">API access</p><h1>Production API key</h1></div><button type="button">Rotate key</button></div>
+    <section class="panel api-panel">
+      <label>API key<input readonly value="ms_live_**********************"></label>
+      <pre>GET /api/internal/access?telegramUserId=42&country=IL&language=he
+Authorization: Bearer &lt;INTERNAL_API_SECRET&gt;</pre>
+    </section>
+    <section class="metrics product-metrics">${metricCard("Rate limit", "120/min", "per workspace")}${metricCard("Webhook status", "Healthy", "signed payloads")}${metricCard("Last call", "2m ago", "200 OK")}</section>
+  </section></main>`;
+}
+
+function renderTickerAnalysis(): string {
+  return `<main class="app-layout">${appSidebar("ticker")}<section class="workspace">
+    <div class="workspace-head"><div><p class="eyebrow">Ticker analysis</p><h1>Analyze a ticker with news context</h1></div></div>
+    <section class="panel ticker-search"><input value="NVDA"><button type="button">Run analysis</button></section>
+    <section class="analysis-grid">
+      <div class="panel"><h2>Signal summary</h2><p class="score">Bullish 85</p><p>Strong news momentum, elevated valuation risk, and positive supplier sentiment.</p></div>
+      <div class="panel"><h2>Drivers</h2><ul><li>AI infrastructure demand remains the core narrative.</li><li>Options activity implies higher short-term volatility.</li><li>Macro rate sensitivity is the main risk factor.</li></ul></div>
+    </section>
+  </section></main>`;
+}
+
+function renderReports(): string {
+  return `<main class="app-layout">${appSidebar("reports")}<section class="workspace">
+    <div class="page-heading compact"><p class="eyebrow">Report history</p><h1>Generated research archive</h1></div>
+    <section class="panel table-card"><table><thead><tr><th>Report</th><th>Market</th><th>Status</th><th>Created</th></tr></thead><tbody>
+      <tr><td>NVDA momentum digest</td><td>US</td><td>Ready</td><td>Today 09:40</td></tr>
+      <tr><td>Banking policy watch</td><td>IL</td><td>Ready</td><td>Yesterday 18:05</td></tr>
+      <tr><td>Energy headline scan</td><td>Global</td><td>Processing</td><td>Yesterday 12:22</td></tr>
+    </tbody></table></section>
+  </section></main>`;
+}
+
+function renderBilling(): string {
+  return `<main class="app-layout">${appSidebar("billing")}<section class="workspace">
+    <div class="page-heading compact"><p class="eyebrow">Billing</p><h1>Subscription and invoices</h1></div>
+    <section class="billing-grid">
+      <div class="panel"><h2>Current plan</h2><p class="price-line">Pro - $79/mo</p><p>Renews on July 15, 2026.</p><button type="button">Manage plan</button></div>
+      <div class="panel"><h2>Payment method</h2><p>Visa ending 4242</p><button type="button">Update card</button></div>
+    </section>
+  </section></main>`;
+}
+
+function feature(title: string, body: string): string {
+  return `<article class="feature-card"><h2>${title}</h2><p>${body}</p></article>`;
+}
+
+function plan(title: string, price: string, items: string[], action: string, highlighted = false): string {
+  return `<article class="plan-card${highlighted ? " highlighted" : ""}"><h2>${title}</h2><p class="plan-price">${price}</p><ul>${items.map((item) => `<li>${item}</li>`).join("")}</ul><a class="primary-action" href="/signup">${action}</a></article>`;
+}
+
+function step(number: string, title: string, body: string): string {
+  return `<article class="step-card"><span>${number}</span><h2>${title}</h2><p>${body}</p></article>`;
+}
+
+function metricCard(label: string, value: string, detail: string): string {
+  return `<article class="metric"><strong>${value}</strong><span>${label}</span><p>${detail}</p></article>`;
+}
+
+function channel(country: string, language: string, delivery: string, status: string): string {
+  return `<article class="channel-card"><h2>${country}</h2><p>${language}</p><strong>${delivery}</strong><span>${status}</span></article>`;
+}
+
+function signalRows(): string {
+  return ["NVDA - AI infrastructure headlines", "TA35 - local banking flow", "BTC - risk appetite proxy", "OIL - policy pressure"]
+    .map((item) => `<div class="signal-row"><span>${item}</span><strong>Review</strong></div>`)
+    .join("");
+}
+
+function appSidebar(active: string): string {
+  const links = [
+    ["dashboard", "/dashboard", "Dashboard"],
+    ["onboarding", "/onboarding", "Onboarding"],
+    ["channels", "/channels", "Countries"],
+    ["api", "/api-access", "API access"],
+    ["ticker", "/ticker", "Ticker analysis"],
+    ["reports", "/reports", "Reports"],
+    ["billing", "/billing", "Billing"],
+    ["admin", "/admin", "Admin"]
+  ];
+  return `<aside class="app-sidebar"><a class="logo" href="/"><span class="mark">MS</span><span>Market Signal AI</span></a><nav>${links.map(([key, href, label]) => `<a class="${active === key ? "active" : ""}" href="${href}">${label}</a>`).join("")}</nav><a class="telegram-link" href="/telegram">Telegram quick entry</a></aside>`;
+}
+
 function renderTelegramApp(env: Env): string {
   return `<!doctype html>
 <html lang="en">
@@ -1252,6 +1960,14 @@ function renderAdminApp(env: Env): string {
           <section class="panel">
             <h2>Subscriptions</h2>
             <div id="subscriptionChart" class="bar-chart"></div>
+          </section>
+          <section class="panel">
+            <h2>API usage</h2>
+            <div id="apiUsage" class="table"></div>
+          </section>
+          <section class="panel">
+            <h2>Recent subscriptions</h2>
+            <div id="subscriptions" class="table"></div>
           </section>
           <section class="panel">
             <h2>Users</h2>
@@ -1392,6 +2108,107 @@ body.dark .pager { color: #9fb0b8; }
 body.dark .event { border-bottom-color: #2b3b45; }
 @media (max-width: 980px) { .admin-grid { grid-template-columns: 1fr; grid-template-areas: "main" "events"; } .event-panel { position: static; width: auto; max-width: none; max-height: none; } }
 @media (max-width: 860px) { .metrics, .auth-row, .filters-row, .route-row { grid-template-columns: 1fr; } }
+`;
+}
+
+function saasCss(): string {
+  return `
+.saas-body { background: #f4f6f4; color: #16201f; }
+.topbar { position: sticky; top: 0; z-index: 10; display: flex; align-items: center; justify-content: space-between; gap: 20px; min-height: 72px; padding: 0 max(24px, calc((100vw - 1180px) / 2)); border-bottom: 1px solid #dce5df; background: rgba(244, 246, 244, 0.94); backdrop-filter: blur(14px); }
+.logo { display: inline-flex; align-items: center; gap: 10px; color: #16201f; font-weight: 900; text-decoration: none; }
+.topbar nav { display: flex; align-items: center; gap: 18px; font-size: 14px; font-weight: 800; }
+.topbar nav a, .app-sidebar a { color: #425552; text-decoration: none; }
+.topbar nav a:hover, .app-sidebar a:hover { color: #0f766e; }
+.nav-cta, .primary-action, .secondary-action { display: inline-flex; align-items: center; justify-content: center; min-height: 42px; border-radius: 6px; padding: 0 14px; font-weight: 900; text-decoration: none; }
+.nav-cta, .primary-action { background: #0f766e; color: #fff !important; }
+.secondary-action { border: 1px solid #b8c9c4; color: #16201f; background: #fff; }
+.saas-shell { width: min(1180px, calc(100% - 48px)); margin: 0 auto; padding: 32px 0 56px; }
+.hero-band { min-height: calc(100vh - 120px); display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(420px, 1.1fr); gap: 42px; align-items: center; padding: 28px 0; }
+.hero-copy h1, .page-heading h1, .workspace h1, .auth-copy h1 { margin: 0; font-size: clamp(42px, 7vw, 84px); line-height: 0.94; letter-spacing: 0; color: #101817; }
+.workspace h1, .page-heading.compact h1 { font-size: 34px; line-height: 1.08; }
+.auth-copy h1, .page-heading h1 { font-size: clamp(36px, 5vw, 58px); line-height: 1; }
+.eyebrow { margin: 0 0 10px; color: #0f766e; font-size: 12px; font-weight: 950; letter-spacing: 0.08em; text-transform: uppercase; }
+.hero-text { max-width: 620px; font-size: 19px; line-height: 1.55; color: #4f6360; }
+.hero-actions, .workspace-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 24px; }
+.product-visual { position: relative; min-height: 480px; border-radius: 8px; overflow: hidden; border: 1px solid #193d39; background: radial-gradient(circle at 78% 18%, rgba(39, 245, 198, 0.34), transparent 28%), linear-gradient(145deg, #091312, #143331 52%, #05100f); box-shadow: 0 28px 90px rgba(13, 65, 60, 0.24); }
+.product-visual::before { content: ""; position: absolute; inset: 0; background-image: linear-gradient(rgba(255,255,255,0.05) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.04) 1px, transparent 1px); background-size: 40px 40px; opacity: 0.5; }
+.terminal-panel { position: absolute; left: 34px; top: 34px; right: 78px; display: grid; gap: 12px; padding: 18px; border: 1px solid rgba(166, 255, 226, 0.24); border-radius: 8px; background: rgba(7, 19, 18, 0.82); color: #dffcf4; }
+.terminal-head, .signal-line, .signal-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.signal-line { min-height: 58px; border-radius: 6px; padding: 10px 12px; background: rgba(255,255,255,0.06); }
+.signal-line span { color: #7ef7cf; font-weight: 950; }
+.signal-line strong { color: #fff; }
+.signal-line em { width: 48%; color: #a9bebb; font-style: normal; font-size: 13px; }
+.signal-line.warn span { color: #f0bf57; }
+.chart-panel { position: absolute; left: 50px; right: 34px; bottom: 34px; display: grid; grid-template-columns: repeat(6, 1fr); align-items: end; gap: 14px; height: 158px; }
+.chart-panel span { display: block; border-radius: 6px 6px 0 0; background: linear-gradient(#6fffd0, #0f766e); opacity: 0.92; }
+.chart-panel span:nth-child(1) { height: 42%; } .chart-panel span:nth-child(2) { height: 58%; } .chart-panel span:nth-child(3) { height: 48%; } .chart-panel span:nth-child(4) { height: 76%; } .chart-panel span:nth-child(5) { height: 64%; } .chart-panel span:nth-child(6) { height: 92%; }
+.feature-grid, .pricing-grid, .step-grid, .channel-grid, .billing-grid, .analysis-grid, .dashboard-grid { display: grid; gap: 16px; }
+.feature-grid { grid-template-columns: repeat(3, 1fr); }
+.feature-card, .plan-card, .step-card, .channel-card { border: 1px solid #dce5df; border-radius: 8px; padding: 20px; background: #fff; }
+.feature-card h2, .plan-card h2, .step-card h2, .channel-card h2 { margin: 0 0 8px; font-size: 19px; }
+.page-stack { display: grid; gap: 24px; }
+.page-heading { max-width: 760px; }
+.pricing-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.plan-card { display: grid; gap: 16px; align-content: start; }
+.plan-card.highlighted { border-color: #0f766e; box-shadow: 0 20px 70px rgba(15, 118, 110, 0.18); }
+.plan-price, .price-line { margin: 0; color: #101817; font-size: 34px; font-weight: 950; }
+.plan-card ul { margin: 0; padding-left: 18px; color: #4f6360; line-height: 1.8; }
+.auth-layout { width: min(1000px, calc(100% - 48px)); min-height: calc(100vh - 72px); margin: 0 auto; display: grid; grid-template-columns: 1fr 390px; gap: 38px; align-items: center; }
+.auth-card { display: grid; gap: 16px; }
+.auth-card a { color: #0f766e; font-weight: 900; }
+.app-layout { min-height: calc(100vh - 72px); display: grid; grid-template-columns: 260px minmax(0, 1fr); }
+.app-sidebar { position: sticky; top: 0; height: 100vh; display: grid; grid-template-rows: auto 1fr auto; gap: 22px; padding: 24px; border-right: 1px solid #dce5df; background: #fff; }
+.app-sidebar nav { display: grid; gap: 6px; align-content: start; }
+.app-sidebar nav a, .telegram-link { border-radius: 6px; padding: 11px 12px; font-weight: 850; }
+.app-sidebar nav a.active { color: #0f766e; background: #e8f6f3; }
+.telegram-link { background: #111d1b; color: #fff !important; text-align: center; }
+.workspace { min-width: 0; padding: 28px; display: grid; gap: 18px; align-content: start; }
+.workspace-head { justify-content: space-between; margin-top: 0; }
+.product-metrics { margin-bottom: 0; }
+.product-metrics .metric p { margin-top: 8px; font-size: 13px; }
+.dashboard-grid, .analysis-grid, .billing-grid { grid-template-columns: minmax(0, 1.15fr) minmax(300px, 0.85fr); }
+.signal-row { min-height: 48px; border-bottom: 1px solid #e7edef; }
+.signal-row strong { color: #0f766e; }
+.heat-list { display: grid; gap: 12px; }
+.heat-list span { min-width: 190px; border-radius: 6px; padding: 10px; background: linear-gradient(90deg, #0f766e, #bdeee1); color: #fff; font-weight: 900; }
+.channel-grid { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+.channel-card { display: grid; gap: 8px; }
+.channel-card strong { color: #0f766e; }
+.channel-card span { width: max-content; border-radius: 999px; padding: 4px 9px; background: #e8f6f3; color: #0f766e; font-size: 12px; font-weight: 950; }
+.form-surface { max-width: 620px; }
+.inline-action { width: max-content; }
+.api-panel { display: grid; gap: 16px; }
+pre { margin: 0; overflow-x: auto; border-radius: 8px; padding: 16px; background: #111d1b; color: #dffcf4; font-size: 13px; line-height: 1.6; }
+.ticker-search { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; }
+.score { color: #0f766e; font-size: 38px; font-weight: 950; }
+.table-card table { min-width: 640px; }
+@media (max-width: 960px) {
+  .topbar { position: static; align-items: flex-start; flex-direction: column; padding: 18px 24px; }
+  .topbar nav { flex-wrap: wrap; }
+  .hero-band, .auth-layout, .app-layout, .dashboard-grid, .analysis-grid, .billing-grid { grid-template-columns: 1fr; }
+  .product-visual { min-height: 390px; }
+  .feature-grid, .pricing-grid { grid-template-columns: 1fr; }
+  .app-sidebar { position: static; height: auto; border-right: 0; border-bottom: 1px solid #dce5df; }
+}
+@media (max-width: 560px) {
+  .saas-shell, .auth-layout { width: min(100% - 28px, 1180px); }
+  .workspace { padding: 18px 14px; }
+  .hero-copy h1 { font-size: 44px; }
+  .product-visual { min-height: 330px; }
+  .terminal-panel { left: 16px; right: 16px; top: 16px; }
+  .chart-panel { left: 18px; right: 18px; bottom: 18px; }
+  .ticker-search { grid-template-columns: 1fr; }
+}
+`;
+}
+
+function saasScript(): string {
+  return `
+document.querySelectorAll("[data-demo-login]").forEach((button) => {
+  button.addEventListener("click", () => {
+    window.location.href = "/dashboard";
+  });
+});
 `;
 }
 
@@ -1548,6 +2365,8 @@ const adminStatus = document.querySelector("#adminStatus");
 const refreshInfo = document.querySelector("#refreshInfo");
 const overview = document.querySelector("#overview");
 const subscriptionChart = document.querySelector("#subscriptionChart");
+const apiUsage = document.querySelector("#apiUsage");
+const subscriptions = document.querySelector("#subscriptions");
 const users = document.querySelector("#users");
 const usersPager = document.querySelector("#usersPager");
 const events = document.querySelector("#events");
@@ -1699,21 +2518,27 @@ async function load(successMessage = "Admin panel loaded.") {
     const query = new URLSearchParams(new FormData(filtersForm));
     query.set("page", String(usersPage));
     query.set("limit", "25");
-    const [summary, userData, eventData, routeData] = await Promise.all([
+    const [summary, userData, eventData, routeData, subscriptionData, usageData] = await Promise.all([
       api("/api/admin/overview"),
       api("/api/admin/users?" + query.toString()),
       api("/api/admin/events"),
-      api("/api/admin/bot-routes")
+      api("/api/admin/bot-routes"),
+      api("/api/admin/subscriptions?limit=10"),
+      api("/api/admin/api-usage?days=14")
     ]);
     adminContent.hidden = false;
     overview.innerHTML = [
       metric("Users", summary.users),
       metric("Active subscriptions", summary.activeSubscriptions),
+      metric("Active API keys", usageData.activeApiKeys),
+      metric("Analysis 24h", usageData.analysisRequests24h),
       metric("Events 24h", summary.events24h),
       metric("Active bot routes", summary.activeBotRoutes),
       metric("Server time", formatTime(summary.serverTime))
     ].join("");
     subscriptionChart.innerHTML = renderSubscriptionChart(summary.subscriptionSeries || []);
+    apiUsage.innerHTML = renderApiUsage(usageData);
+    subscriptions.innerHTML = renderSubscriptions(subscriptionData.subscriptions || []);
     refreshInfo.innerHTML = '<span><strong>Server:</strong> ' + formatTime(summary.serverTime) + '</span><span><strong>Local:</strong> ' + formatTime(new Date().toISOString()) + '</span><span><strong>Refreshed:</strong> ' + new Date().toLocaleString() + '</span>';
     users.innerHTML = renderUsers(userData.users);
     usersPager.innerHTML = renderPager(userData.pagination);
@@ -1747,6 +2572,28 @@ function renderSubscriptionChart(series) {
     const label = item.day.slice(5);
     return '<div class="bar-item"><div class="bar-value">' + escapeText(item.count) + '</div><div class="bar-track"><div class="bar-fill" style="height:' + height + '%"></div></div><div class="bar-label">' + escapeText(label) + '</div></div>';
   }).join("");
+}
+
+function renderApiUsage(data) {
+  const rows = data.topEndpoints || [];
+  if (!rows.length) return '<p>No API usage yet.</p>';
+  return '<table><thead><tr><th>Endpoint</th><th>Calls</th></tr></thead><tbody>' +
+    rows.map((row) => '<tr><td>' + escapeText(row.endpoint) + '</td><td>' + escapeText(row.count) + '</td></tr>').join("") +
+    '</tbody></table>';
+}
+
+function renderSubscriptions(rows) {
+  if (!rows.length) return '<p>No subscriptions yet.</p>';
+  return '<table><thead><tr><th>User</th><th>Plan</th><th>Status</th><th>Provider</th><th>Period end</th><th>Created</th></tr></thead><tbody>' +
+    rows.map((row) => '<tr>' +
+      '<td>' + escapeText(row.email || row.display_name || row.user_id) + '</td>' +
+      '<td>' + escapeText(row.plan) + '</td>' +
+      '<td>' + escapeText(row.status) + '</td>' +
+      '<td>' + escapeText(row.provider) + '</td>' +
+      '<td>' + escapeText(row.current_period_end || "") + '</td>' +
+      '<td>' + escapeText(row.created_at) + '</td>' +
+    '</tr>').join("") +
+    '</tbody></table>';
 }
 
 function renderPager(pagination) {
