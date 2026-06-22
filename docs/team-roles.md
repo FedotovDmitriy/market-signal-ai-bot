@@ -21,7 +21,7 @@ Responsibilities:
 
 - Breaks main-manager requests into service tasks.
 - Keeps architecture, team, QA, DevOps, and release documentation current.
-- Coordinates Yasha, Glasha, Lena, Max, and service managers.
+- Coordinates Yasha, Glasha, Lena, Max, Oleg, and service managers.
 - Flags missing decisions and integration risks.
 
 ## Product Team
@@ -64,6 +64,18 @@ Responsibilities:
 
 See [DevOps Cloudflare Plan](./devops-cloudflare-plan.md).
 
+### Oleg - Legal / Compliance Advisor
+
+Responsibilities:
+
+- Owns product legal and compliance requirements.
+- Drafts and reviews Terms of Service, Privacy Policy, Subscription Terms, Refund Policy, API Terms, and financial disclaimers.
+- Ensures ticker analysis and signals are presented as informational content, not personalized investment advice.
+- Defines legal copy requirements for website, dashboard, Telegram bots/channels, reports, and API documentation.
+- Flags risks around payments, user data, market data providers, Telegram data, and API redistribution.
+
+See [Legal And Compliance Plan](./legal-compliance-plan.md).
+
 ## Service Managers
 
 ### telegram_company_matcher_app Manager
@@ -90,6 +102,6 @@ A production release is ready only when:
 - Glasha says product UX is acceptable.
 - Lena says QA status is ready or ready with accepted risks.
 - Max says infrastructure is ready or ready with accepted risks.
+- Oleg says legal status is ready or ready with accepted risks.
 - Project manager confirms docs and checklist are updated.
 - Main manager approves release.
-

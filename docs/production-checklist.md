@@ -9,6 +9,8 @@ Use this checklist before a production launch or major release.
 - Pricing and subscription rules are documented.
 - Country/language access rules are documented.
 - API usage rules are documented.
+- Financial/investment disclaimer is approved.
+- Terms of Service and Privacy Policy are approved.
 
 ## market-signal-ai-bot
 
@@ -67,6 +69,22 @@ Use this checklist before a production launch or major release.
 - Rollback path is documented.
 - Secret rotation process is documented.
 
+## Legal / Compliance
+
+- Terms of Service are ready.
+- Privacy Policy is ready.
+- Subscription Terms are ready.
+- Refund Policy is ready.
+- API Terms of Use are ready.
+- Risk Disclaimer is ready.
+- Telegram bot/channel disclaimer is ready.
+- Website footer links to legal documents.
+- Ticker analysis pages show or link to financial disclaimer.
+- API docs include API terms and redistribution limits.
+- Product language does not promise returns.
+- Product language does not present outputs as personalized investment advice.
+- Third-party market-data restrictions are reviewed.
+
 ## Go / No-Go
 
 Release requires:
@@ -75,6 +93,6 @@ Release requires:
 - Designer approval for user-facing surfaces.
 - QA approval.
 - DevOps approval.
+- Legal / compliance approval.
 - Project manager approval.
 - Main manager approval.
-
