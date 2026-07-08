@@ -21,7 +21,7 @@ Responsibilities:
 
 - Breaks main-manager requests into service tasks.
 - Keeps architecture, team, QA, DevOps, and release documentation current.
-- Coordinates Yasha, Glasha, Lena, Max, Oleg, and service managers.
+- Coordinates Yasha, Glasha, Lena, Max, Oleg, Marina, Natalia, Roman, and service managers.
 - Flags missing decisions and integration risks.
 
 ## Product Team
@@ -76,6 +76,50 @@ Responsibilities:
 
 See [Legal And Compliance Plan](./legal-compliance-plan.md).
 
+### Марина - консультант по юрисдикции бизнеса и платежам
+
+Зона ответственности:
+
+- Помогает выбрать юрисдикцию для SaaS-компании.
+- Сравнивает платежных провайдеров с точки зрения права, операций, счетов, возвратов, налогов и подписок.
+- Готовит матрицу выбора юрисдикции: Грузия, США, ЕС, Израиль и другие релевантные варианты.
+- Проверяет, подходят ли Stripe, Paddle, Lemon Squeezy, PayPal/Braintree, Recurly или другой провайдер под выбранную бизнес-модель.
+- Работает с Олегом по условиям оплаты, политике возвратов, формулировкам подписки и вопросам локального юридического ревью.
+- Готовит вопросы для лицензированного местного юриста и бухгалтера перед публичным запуском.
+
+### Наталья - локальный юрист и налоговый бухгалтер
+
+Зона ответственности:
+
+- Даёт практическое заключение по выбранной юрисдикции, регистрации компании, налоговой резидентности, бухгалтерии и обязательным filings.
+- Проверяет, можно ли выбранной компании подключить Stripe, Paddle, Lemon Squeezy или другой платежный провайдер.
+- Подтверждает, как учитывать выплаты от Merchant of Record, возвраты, chargebacks, комиссии, налоги и подписочную выручку.
+- Проверяет требования по VAT, sales tax, GST, локальным налогам, счетам, квитанциям и хранению бухгалтерских документов.
+- Отвечает на вопросы Марины в `docs/legal/reports/task-09-local-counsel-accountant-questions.md` прямо в полях `Answer:`.
+- Даёт финальный статус: `Юрисдикция и налоги готовы`, `Готово с рисками` или `Заблокировано`.
+
+### Сергей - бухгалтер по SaaS и Merchant of Record учёту
+
+Зона ответственности:
+
+- Готовит accounting setup для SaaS-подписок через Merchant of Record.
+- Описывает chart of accounts для gross sales, net payouts, platform fees, refunds, chargebacks, taxes, deferred revenue и bank reconciliation.
+- Готовит требования к CPA/bookkeeper и список документов для ежемесячного закрытия.
+- Проверяет, что Paddle/Lemon Squeezy payout reports можно корректно связать с банковскими поступлениями и подписочной выручкой.
+- Работает с Натальей по tax/accounting требованиям и с Мариной по payment provider reports.
+- Не заменяет лицензированного CPA/bookkeeper, если для подачи отчётности или налогового заключения нужен внешний специалист.
+
+### Роман - инженер по кибербезопасности и безопасности приложения
+
+Зона ответственности:
+
+- Отвечает за требования безопасности для аккаунтов на сайте, входа через Telegram, входа через Google, API-токенов, админ-доступа, внутренних эндпоинтов и вебхуков.
+- Готовит модель угроз для SaaS-продукта.
+- Проверяет безопасные сессии, OAuth-параметры `state` и `nonce`, проверку Telegram init data, хеширование API-токенов, отзыв токенов, лимиты запросов и аудит-логи.
+- Следит, чтобы секреты не хранились в коде, логах или D1 в открытом виде.
+- Проверяет production-gate по безопасности перед релизом.
+- Даёт один из статусов: `Безопасность готова`, `Готово с рисками безопасности` или `Заблокировано`.
+
 ## Service Managers
 
 ### telegram_company_matcher_app Manager
@@ -103,5 +147,8 @@ A production release is ready only when:
 - Lena says QA status is ready or ready with accepted risks.
 - Max says infrastructure is ready or ready with accepted risks.
 - Oleg says legal status is ready or ready with accepted risks.
+- Марина подтверждает, что юрисдикция и платежи готовы или готовы с принятыми рисками.
+- Наталья подтверждает, что локальная юридическая, налоговая и бухгалтерская проверка готова или готова с принятыми рисками.
+- Роман подтверждает, что безопасность готова или готова с принятыми рисками.
 - Project manager confirms docs and checklist are updated.
 - Main manager approves release.

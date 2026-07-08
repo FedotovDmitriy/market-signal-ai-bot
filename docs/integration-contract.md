@@ -89,32 +89,61 @@ GET /api/internal/access?telegramUserId=<telegram_id>&country=<iso2>&language=<l
 
 ### Access Check Authentication
 
-The endpoint is protected by `INTERNAL_API_SECRET`.
+The endpoint is protected by an identified HMAC signing key. Bearer authentication is not accepted.
 
 Preferred HMAC headers:
 
 ```http
 X-Timestamp: <unix_timestamp_seconds>
+X-Key-Id: <active_key_id>
+X-Request-Id: <unique_request_id>
 X-Signature: sha256=<hex_hmac_sha256>
 ```
 
 Signature payload:
 
 ```text
-<timestamp>.<method>.<pathname>.<canonical_query>
+<timestamp>.<key_id>.<request_id>.<method>.<pathname>.<canonical_query>.<sha256_raw_body>
 ```
 
 Example payload:
 
 ```text
-1781184000.GET./api/internal/access.country=IL&language=he&telegramUserId=123456789
+1781184000.matcher-v1.req_123.GET./api/internal/access.country=IL&language=he&telegramUserId=123456789.<sha256_empty_body>
 ```
 
-For internal operations, the endpoint also accepts:
+The pair `X-Key-Id + X-Request-Id` is single-use. A replay returns HTTP `409`.
+
+HMAC authentication does not grant access to every internal endpoint. Core must enforce an explicit scope allowlist for each active key ID:
+
+- matcher: `matcher:access`, `matcher:deliver`;
+- scanner: `scanner:access`, `scanner:cache`, `scanner:history`.
+- website: `website:subscriptions`.
+
+A correctly signed request with a key that lacks the endpoint scope returns HTTP `403 internal_scope_required` before Core consumes the transport nonce or executes business logic. Key scopes come from the managed `INTERNAL_API_SCOPES_JSON` allowlist and are never inferred from a key ID prefix.
+
+## Website-To-Core Subscription Events
+
+Contract status: `Implemented in market-signal-ai-bot dev`.
 
 ```http
-Authorization: Bearer <INTERNAL_API_SECRET>
+POST /api/internal/subscriptions
 ```
+
+Owner: `market-signal-ai-bot`.
+
+Caller: public website / checkout backend.
+
+Key IDs:
+
+- dev: `website-dev-v1` - active in Core dev through split Cloudflare secret `INTERNAL_API_SECRET_WEBSITE_DEV_V1` or the managed keyring;
+- production: `website-prod-v1` - reserved name, secret is not created or enabled until production approval.
+
+Required scope: `website:subscriptions`.
+
+Authentication is HMAC-SHA256 only. Bearer is not accepted. The request uses `X-Key-Id`, unique transport `X-Request-Id`, `X-Timestamp`, and `X-Signature` with the canonical format defined above.
+
+The request body matches the existing subscription event payload accepted by `/api/subscriptions`, but this internal route is preferred for trusted website-to-Core integration because it supports service key rotation, per-route scopes, and replay protection.
 
 ### Access Check Response
 
@@ -139,18 +168,237 @@ Known `reason` values:
 - `country_not_linked`
 - `country_bot_not_configured`
 - `active_subscription_required`
+- `subscription_period_expired`
+
+## Matcher-To-Core Telegram Delivery
+
+Contract status: `Implemented in market-signal-ai-bot; live dev integration pending`.
+
+```http
+POST /api/internal/deliver
+```
+
+Owner: `market-signal-ai-bot`.
+
+Caller: `telegram_company_matcher_app`.
+
+Key IDs:
+
+- dev: `matcher-dev-v1` - active in Core dev through the split Cloudflare secret `INTERNAL_API_SECRET_MATCHER_DEV_V1` or the managed keyring;
+- production: `matcher-prod-v1` - reserved name, secret is not created or enabled until production approval.
+
+Authentication is HMAC-SHA256 only. Bearer is not accepted. The request uses `X-Key-Id`, unique transport `X-Request-Id`, `X-Timestamp`, and `X-Signature` with the canonical format defined above. A retry keeps the same business `deliveryId` but uses a new transport `X-Request-Id` and signature.
+
+### Delivery Request
+
+```ts
+type InternalDeliveryRequest = {
+  contractVersion: "1.0";
+  requestId: string;
+  deliveryId: string;
+  recipient:
+    | { type: "user"; userId: string; country: string; language: string }
+    | { type: "channel"; routeId: string; country: string; language: string };
+  content: {
+    kind: "news_signal" | "ticker_analysis" | "service_notice";
+    text: string;
+    ticker: string | null;
+    reportType: "regular" | "fundrep" | null;
+  };
+};
+```
+
+Rules:
+
+- Matcher prepares the final plain-text user message. Core does not generate editorial text in v1.0.
+- Core resolves the Telegram destination from `userId` or `routeId`; matcher cannot provide a raw Telegram chat ID or bot token.
+- Core rechecks user access immediately before user delivery. A previous `/api/internal/access` response is not sufficient by itself.
+- Core validates content length and rejects raw monitored-source identifiers, raw secrets, and unsupported formatting.
+- `deliveryId` is the business idempotency key. The same valid delivery returns the stored result without sending a second Telegram message.
+- A changed immutable payload with the same `deliveryId` is rejected.
+
+### Delivery Response
+
+```ts
+type InternalDeliveryResponse = {
+  contractVersion: "1.0";
+  requestId: string;
+  deliveryId: string;
+  status: "sent" | "duplicate" | "access_denied" | "failed";
+  telegramMessageId: string | null;
+  reason: string | null;
+  sentAt: string | null;
+  retryable?: boolean;
+};
+```
+
+HTTP policy:
+
+- `200`: `sent`, `duplicate`, or business `access_denied`;
+- `400`: invalid payload or changed payload for an existing `deliveryId`;
+- `401/403`: missing or invalid HMAC authorization;
+- `409`: replayed transport `X-Request-Id`, concurrent delivery, or an indeterminate Telegram outcome that must not be retried automatically;
+- `503`: Telegram or internal dependency failure. Retry only when `retryable: true`, keeping the same `deliveryId` and using a new transport request ID.
+
+Core owns Telegram credentials, route resolution, final access enforcement, delivery idempotency ledger, Telegram response metadata, and audit events. User delivery resolves `users.telegram_user_id`; channel delivery resolves the admin-managed `bot_routes.route_id` and `telegram_chat_id`. An ambiguous network outcome is stored as `indeterminate` to prevent duplicate automatic sends. Matcher owns news/analysis orchestration and final plain-text content.
+
+## Scanner-To-Core Access And Quota Check
+
+`stock-signal-scanner` must not accept billing, ownership, subscription, or quota ledger data from a public scanner payload.
+
+Before scanner performs paid or user-targeted analysis, scanner must ask `market-signal-ai-bot` for the final access and quota decision.
+
+```http
+POST /api/internal/access/check
+```
+
+Owner: `market-signal-ai-bot`.
+
+Caller: `stock-signal-scanner`.
+
+Authentication: HMAC-SHA256 only. Send `X-Key-Id`, unique `X-Request-Id`, `X-Timestamp`, and `X-Signature: sha256=<hex>` and sign:
+
+```text
+<timestamp>.<key_id>.<request_id>.<method>.<path>.<canonical_query>.<sha256_raw_body>
+```
+
+For this endpoint, the canonical query is empty. The timestamp is Unix seconds and expires after five minutes. Reuse of the same key ID and request ID returns HTTP `409`.
+
+### Request
+
+Production target: `contractVersion: "1.1"`. Version `1.0` is the previous development contract and must not be used for the new cache-aware production integration.
+
+```ts
+type ScannerAccessCheckRequest = {
+  contractVersion: "1.1";
+  requestId: string;
+  userId: string;
+  chatId: string | null;
+  ticker: string;
+  reportType: "regular" | "fundrep";
+  generationVersion: string;
+  cacheStatus: "hit" | "miss"; // diagnostic hint only
+  cacheCreatedAt: string | null; // diagnostic hint only
+  cacheGenerationVersion: string | null; // diagnostic hint only
+  forceRefresh: boolean;
+  language: "ru" | "en" | "he";
+};
+```
+
+`cacheStatus`, `cacheCreatedAt`, and `cacheGenerationVersion` are signed diagnostic hints. They never authorize a discounted charge. Core decides cache hit/miss only from its own committed cache ledger. `forceRefresh: true` always bypasses cache.
+
+### Response
+
+```ts
+type ScannerAccessCheckResponse = {
+  contractVersion: "1.1";
+  requestId: string;
+  allowed: boolean;
+  chargeUnits: number;
+  quotaDecision:
+    | "new_regular"
+    | "own_repeat"
+    | "cached_regular"
+    | "refresh_regular"
+    | "new_fundrep"
+    | "own_repeat_fundrep"
+    | "cached_fundrep"
+    | "refresh_fundrep"
+    | "rejected_no_quota"
+    | "rejected_no_access";
+  cacheStatus: "hit" | "miss" | "bypass";
+  reportSource: "new_analysis" | "cache" | "own_repeat" | "none";
+  remainingUnits: number | null;
+  reason: string | null;
+  cacheReceiptId: string | null;
+};
+```
+
+For an allowed `new_*` or `refresh_*` decision, Core creates and returns a one-time `cacheReceiptId`. The receipt must be committed within 15 minutes of issuance. Replaying the same `requestId + ticker` returns the same receipt without another charge. Cached and rejected decisions return `null`.
+
+### Quota Cost And TTL
+
+| Scenario | `chargeUnits` |
+| --- | ---: |
+| regular new or refresh | 1 |
+| regular cached | 0.5 |
+| regular own repeat | 0 |
+| FundRep new or refresh | 3 |
+| FundRep cached | 1.5 |
+| FundRep own repeat | 0 |
+
+Cache TTL is 60 minutes. Core stores quota in integer half-unit credits (`0.5 unit = 1 credit`) and converts back to units in the API response.
+
+### Core-Owned Cache Commit
+
+After a successful new or refreshed analysis, scanner commits the Core-issued receipt:
+
+```http
+POST /api/internal/access/cache/commit
+```
+
+The endpoint uses the same HMAC-only transport and replay protection.
+
+```ts
+type ScannerCacheCommitRequest = {
+  contractVersion: "1.1";
+  cacheReceiptId: string;
+  requestId: string;
+  ticker: string;
+  reportType: "regular" | "fundrep";
+  generationVersion: string;
+  language: "ru" | "en" | "he";
+  resultDigest: string;
+};
+
+type ScannerCacheCommitResponse = {
+  contractVersion: "1.1";
+  cacheEntryId: string;
+  committed: boolean;
+  expiresAt: string;
+};
+```
+
+Core accepts commit only for an existing, unused receipt issued by an allowed full-price new/refresh decision with matching immutable fields. Core sets `createdAt` and `expiresAt` using server time. Future cache discounts are based only on this committed ledger entry, never on scanner-provided cache metadata.
+
+### HTTP And Idempotency Policy
+
+- Allowed and rejected business decisions return HTTP `200`.
+- Invalid payload, unsupported contract version, or reuse of `requestId + ticker` with different immutable payload fields returns HTTP `400`.
+- Missing or invalid HMAC authentication returns HTTP `401` or `403`.
+- Internal database or service unavailability returns `5xx`.
+- Repeating the same valid business payload for `requestId + ticker` returns the stored own-repeat decision with zero additional charge.
+
+Known `reason` values should include:
+
+- `active_subscription_required`
+- `subscription_period_expired`
+- `quota_exceeded`
+- `user_not_found`
+- `unsupported_report_type`
+- `invalid_contract_version`
+- `invalid_request`
+- `internal_access_unavailable`
+
+Ownership rule:
+
+- `market-signal-ai-bot` owns billing state, subscription ownership, quota ledger, cache receipts, committed cache ledger, charge decision, remaining units, and idempotent quota decisions by `requestId + ticker`.
+- `stock-signal-scanner` owns analysis execution and physical result cache. It may send cache hints, but it cannot create a discounted billing cache entry without a Core-issued receipt.
+- Scanner must fail closed in production if `/api/internal/access/check` is unavailable or returns an invalid response.
 
 ### Example Access Check Response: Allowed
 
 ```json
 {
+  "contractVersion": "1.1",
+  "requestId": "req_20260628_001",
   "allowed": true,
-  "reason": null,
-  "userId": "usr_123",
-  "country": "IL",
-  "language": "he",
-  "subscriptionStatus": "active",
-  "botUrl": "https://t.me/Israel_News_Ticker_Scanner_bot"
+  "chargeUnits": 1,
+  "quotaDecision": "new_regular",
+  "cacheStatus": "miss",
+  "reportSource": "new_analysis",
+  "remainingUnits": 99,
+  "reason": null
 }
 ```
 
@@ -158,13 +406,15 @@ Known `reason` values:
 
 ```json
 {
+  "contractVersion": "1.1",
+  "requestId": "req_20260628_002",
   "allowed": false,
-  "reason": "active_subscription_required",
-  "userId": "usr_123",
-  "country": "US",
-  "language": "ru",
-  "subscriptionStatus": "expired",
-  "botUrl": null
+  "chargeUnits": 0,
+  "quotaDecision": "rejected_no_quota",
+  "cacheStatus": "miss",
+  "reportSource": "none",
+  "remainingUnits": 0,
+  "reason": "quota_exceeded"
 }
 ```
 

@@ -190,6 +190,7 @@ Recommended agenda for the next weekly review:
    - Glasha: SaaS dashboard UX.
    - Lena: v0.1 QA checklist.
    - Max: dev/staging/prod checklist.
+   - Марина: матрица выбора юрисдикции и платежного провайдера.
+   - Роман: модель угроз для авторизации и API-безопасности.
    - News manager: matcher payload and access check.
    - Scanner manager: validation and response contract.
-

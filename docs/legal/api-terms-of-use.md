@@ -5,6 +5,12 @@ Last updated: 2026-06-18.
 
 These API Terms apply to use of Market Signal AI APIs, API keys, webhooks, internal or external endpoints, analysis request endpoints, and related developer features.
 
+## MVP Product Decision
+
+For the MVP, API customers may display API outputs in their own product or internal workflow only with Market Signal AI attribution, visible risk disclaimers, and plan restrictions.
+
+Resale, sublicensing, white-label redistribution, standalone redistribution, or use of API outputs to build a competing API or paid signal product is forbidden without a separate written agreement.
+
 ## 1. API License
 
 Subject to these API Terms, the Terms of Service, payment obligations, and plan limits, Market Signal AI grants the user a limited, revocable, non-exclusive, non-transferable right to access the API for permitted internal business or personal research use.
@@ -49,7 +55,19 @@ Users must not:
 
 ## 5. Commercial Use
 
-Commercial redistribution, white-label products, public apps, paid newsletters, trading communities, managed account services, broker integrations, or products that expose Market Signal AI outputs to third parties require written approval and may require a separate enterprise agreement.
+For MVP, commercial display of API outputs is allowed only when the user's plan permits it, Market Signal AI is clearly attributed, required disclaimers are shown, and the outputs are not presented as personalized investment advice or guaranteed trading signals.
+
+Users may not resell, sublicense, redistribute, publish, package, or provide API outputs as a standalone data product, advisory product, paid signal service, newsletter, trading community feature, broker integration, or white-label product unless Market Signal AI has signed a separate written agreement with the user.
+
+Any public, customer-facing, or third-party-facing display must include clear attribution and disclaimer text approved by Market Signal AI.
+
+Minimum attribution:
+
+> Data and analysis by Market Signal AI.
+
+Minimum display disclaimer:
+
+> Informational market analysis only. Not investment advice. No guaranteed results.
 
 ## 6. Rate Limits And Usage Limits
 
@@ -77,6 +95,8 @@ Minimum disclaimer:
 
 > Market Signal AI provides informational market analysis only. It is not investment advice and does not recommend buying or selling any financial instrument.
 
+For MVP commercial display, users must also follow the API Commercial Use MVP Wording document.
+
 ## 10. Monitoring
 
 Market Signal AI may monitor API usage for billing, rate limits, abuse prevention, security, service improvement, and compliance.
@@ -96,4 +116,3 @@ Local legal review required before launch:
 - securities/investment-advice perimeter for third-party-facing integrations;
 - export control and sanctions restrictions if applicable;
 - enterprise contract terms for B2B API customers.
-

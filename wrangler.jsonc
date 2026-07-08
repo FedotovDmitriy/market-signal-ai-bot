@@ -4,10 +4,15 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-06-04",
   "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "preview_urls": false,
   "observability": {
     "enabled": true,
     "head_sampling_rate": 1
   },
+  "send_email": [
+    { "name": "EMAIL" }
+  ],
   "vars": {
     "ENVIRONMENT": "production",
     "PUBLIC_APP_NAME": "Market Signal AI",
@@ -22,5 +27,55 @@
       "database_id": "ebc41219-4276-4068-adb4-1a78d0f0192f",
       "migrations_dir": "migrations"
     }
-  ]
+  ],
+  "env": {
+    "dev": {
+      "name": "market-signal-ai-bot-dev",
+      "workers_dev": true,
+      "preview_urls": false,
+      "vars": {
+        "ENVIRONMENT": "dev",
+        "PUBLIC_APP_NAME": "Market Signal AI (Dev)",
+        "DEFAULT_LOCALE": "en",
+        "DEFAULT_COUNTRY": "US",
+        "ALLOW_UNVERIFIED_TELEGRAM": "false",
+        "ALLOWED_ORIGINS": "https://beta.market-signal.ai,https://market-signal-ai-bot-dev.fnemoy.workers.dev",
+        "INTERNAL_API_KEY_ID": "scanner-dev-v2"
+      },
+      "send_email": [
+        { "name": "EMAIL" }
+      ],
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "market-signal-ai-bot-dev-db",
+          "database_id": "4840d883-6136-40b6-8eb9-65ccede85670",
+          "migrations_dir": "migrations"
+        }
+      ]
+    },
+    "production": {
+      "name": "market-signal-ai-bot",
+      "workers_dev": true,
+      "preview_urls": false,
+      "vars": {
+        "ENVIRONMENT": "production",
+        "PUBLIC_APP_NAME": "Market Signal AI",
+        "DEFAULT_LOCALE": "en",
+        "DEFAULT_COUNTRY": "US",
+        "ALLOW_UNVERIFIED_TELEGRAM": "false"
+      },
+      "send_email": [
+        { "name": "EMAIL" }
+      ],
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "market-signal-ai-bot-db",
+          "database_id": "ebc41219-4276-4068-adb4-1a78d0f0192f",
+          "migrations_dir": "migrations"
+        }
+      ]
+    }
+  }
 }

@@ -5,11 +5,16 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev --local --port 8787",
-    "deploy": "wrangler deploy",
+    "dev:cloudflare": "wrangler dev --env dev",
+    "deploy": "wrangler deploy --env dev",
+    "deploy:dev": "wrangler deploy --env dev",
+    "deploy:production": "wrangler deploy --env production",
     "check": "tsc --noEmit",
     "test": "vitest run --environment node src/index.test.ts",
     "db:apply:local": "wrangler d1 migrations apply market-signal-ai-bot-db --local",
-    "db:apply:remote": "wrangler d1 migrations apply market-signal-ai-bot-db --remote"
+    "db:apply:dev": "wrangler d1 migrations apply market-signal-ai-bot-dev-db --env dev --remote",
+    "db:seed:test-user:dev": "wrangler d1 execute market-signal-ai-bot-dev-db --env dev --remote --file scripts/dev/seed-test-user.sql",
+    "db:apply:production": "wrangler d1 migrations apply market-signal-ai-bot-db --env production --remote"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260530.0",

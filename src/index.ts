@@ -1,5 +1,6 @@
 export interface Env {
   DB: D1Database;
+  EMAIL?: SendEmail;
   ENVIRONMENT: string;
   PUBLIC_APP_NAME: string;
   DEFAULT_LOCALE: string;
@@ -8,6 +9,15 @@ export interface Env {
   ADMIN_USERNAME?: string;
   ADMIN_TOKEN?: string;
   INTERNAL_API_SECRET?: string;
+  INTERNAL_API_KEY_ID?: string;
+  INTERNAL_API_SECRETS_JSON?: string;
+  INTERNAL_API_SCOPES_JSON?: string;
+  INTERNAL_API_SECRET_MATCHER_DEV_V1?: string;
+  INTERNAL_API_SECRET_WEBSITE_DEV_V1?: string;
+  API_KEY_HASH_SECRET?: string;
+  EMAIL_VERIFICATION_SECRET?: string;
+  EMAIL_FROM?: string;
+  EMAIL_FROM_NAME?: string;
   TELEGRAM_BOT_TOKEN?: string;
   TELEGRAM_WEBHOOK_SECRET?: string;
   SUBSCRIPTION_WEBHOOK_SECRET?: string;
@@ -21,6 +31,8 @@ type AppUser = {
   id: string;
   telegram_user_id: string | null;
   email: string | null;
+  email_verified_at: string | null;
+  pending_email: string | null;
   display_name: string | null;
   language: string;
   country: string;
@@ -58,6 +70,13 @@ type ApiKeyRecord = {
   is_active: number;
   created_at: string;
   updated_at: string;
+  hash_version?: string;
+};
+
+type ApiKeyIdentity = {
+  id: string;
+  userId: string;
+  scopes: string[];
 };
 
 type AnalysisRequestInput = {
@@ -104,7 +123,103 @@ type RateLimitRule = {
   windowSeconds: number;
 };
 
+type AuthenticatedSession = {
+  user: AppUser;
+  sessionId: string;
+  csrfTokenHash: string;
+};
+
+type ScannerAccessCheckRequest = {
+  contractVersion: "1.1";
+  requestId: string;
+  userId: string;
+  chatId: string | null;
+  ticker: string;
+  reportType: "regular" | "fundrep";
+  generationVersion: string;
+  cacheStatus: "hit" | "miss";
+  cacheCreatedAt: string | null;
+  cacheGenerationVersion: string | null;
+  forceRefresh: boolean;
+  language: "ru" | "en" | "he";
+};
+
+type QuotaDecisionV11 =
+  | "new_regular"
+  | "own_repeat"
+  | "cached_regular"
+  | "refresh_regular"
+  | "new_fundrep"
+  | "own_repeat_fundrep"
+  | "cached_fundrep"
+  | "refresh_fundrep"
+  | "rejected_no_quota"
+  | "rejected_no_access";
+
+type QuotaDecisionRowV11 = {
+  request_id: string;
+  ticker: string;
+  payload_hash: string;
+  report_type: "regular" | "fundrep";
+  allowed: number;
+  charge_credits: number;
+  quota_decision: QuotaDecisionV11 | "pending" | "approved_unsettled";
+  effective_cache_status: "hit" | "miss" | "bypass";
+  report_source: "new_analysis" | "cache" | "own_repeat" | "none";
+  remaining_credits: number | null;
+  cache_receipt_id: string | null;
+  reason: string | null;
+};
+
+type ScannerCacheCommitRequest = {
+  contractVersion: "1.1";
+  cacheReceiptId: string;
+  requestId: string;
+  ticker: string;
+  reportType: "regular" | "fundrep";
+  generationVersion: string;
+  language: "ru" | "en" | "he";
+  resultDigest: string;
+};
+
+type InternalScope =
+  | "matcher:access"
+  | "matcher:deliver"
+  | "scanner:access"
+  | "scanner:cache"
+  | "scanner:history"
+  | "website:subscriptions";
+
+type InternalDeliveryRequest = {
+  contractVersion: "1.0";
+  requestId: string;
+  deliveryId: string;
+  recipient:
+    | { type: "user"; userId: string; country: string; language: string }
+    | { type: "channel"; routeId: string; country: string; language: string };
+  content: {
+    kind: "news_signal" | "ticker_analysis" | "service_notice";
+    text: string;
+    ticker: string | null;
+    reportType: "regular" | "fundrep" | null;
+  };
+};
+
+type DeliveryLedgerRow = {
+  delivery_id: string;
+  request_id: string;
+  payload_hash: string;
+  status: "pending" | "sending" | "sent" | "failed" | "indeterminate" | "access_denied";
+  telegram_message_id: string | null;
+  failure_reason: string | null;
+  sent_at: string | null;
+};
+
 const ACTIVE_SUBSCRIPTION_STATUSES = ["trialing", "active"] as const;
+const SESSION_COOKIE_NAME = "ms_session";
+const SESSION_TTL_SECONDS = 60 * 60 * 24 * 30;
+const API_KEY_SCOPES = ["analysis:read", "analysis:write"] as const;
+const EMAIL_VERIFICATION_TTL_MINUTES = 15;
 const NEWS_CHAT_OPTIONS = [
   { country: "IL", language: "he", name: "Israel news", languageName: "Hebrew", botUrl: "https://t.me/Israel_News_Ticker_Scanner_bot" },
   { country: "US", language: "ru", name: "US news", languageName: "Russian", botUrl: "https://t.me/US_News_Ticker_Scanner_RU_bot" }
@@ -180,12 +295,20 @@ export default {
         return withCors(request, await registerUser(request, env, ctx), env);
       }
 
+      if (url.pathname === "/api/auth/email/request" && request.method === "POST") {
+        return withCors(request, await requestEmailVerification(request, env, ctx), env);
+      }
+
+      if (url.pathname === "/api/auth/email/verify" && (request.method === "POST" || request.method === "GET")) {
+        return withCors(request, await verifyEmailToken(request, env, ctx), env);
+      }
+
       if (url.pathname === "/api/settings" && request.method === "PUT") {
         return withCors(request, await updateSettings(request, env, ctx), env);
       }
 
       if (url.pathname === "/api/account" && request.method === "GET") {
-        return withCors(request, await accountDetails(url, env), env);
+        return withCors(request, await accountDetails(request, env), env);
       }
 
       if (url.pathname === "/api/account/countries" && request.method === "DELETE") {
@@ -193,7 +316,7 @@ export default {
       }
 
       if (url.pathname === "/api/me" && request.method === "GET") {
-        return withCors(request, await userDashboard(url, env), env);
+        return withCors(request, await userDashboard(request, env), env);
       }
 
       if (url.pathname === "/api/me/profile" && request.method === "PUT") {
@@ -201,15 +324,19 @@ export default {
       }
 
       if (url.pathname === "/api/me/subscription" && request.method === "GET") {
-        return withCors(request, await userSubscription(url, env), env);
+        return withCors(request, await userSubscription(request, env), env);
       }
 
       if (url.pathname === "/api/me/api-keys" && request.method === "GET") {
-        return withCors(request, await userApiKeys(url, env), env);
+        return withCors(request, await userApiKeys(request, env), env);
       }
 
       if (url.pathname === "/api/me/api-keys" && request.method === "POST") {
         return withCors(request, await createUserApiKey(request, env, ctx), env);
+      }
+
+      if (url.pathname === "/api/me/api-keys/rotate" && request.method === "POST") {
+        return withCors(request, await rotateUserApiKey(request, env, ctx), env);
       }
 
       if (url.pathname === "/api/me/api-keys" && request.method === "DELETE") {
@@ -217,23 +344,56 @@ export default {
       }
 
       if (url.pathname === "/api/me/analysis-history" && request.method === "GET") {
-        return withCors(request, await userAnalysisHistory(url, env), env);
+        return withCors(request, await userAnalysisHistory(request, env), env);
+      }
+
+      if (url.pathname === "/api/analysis/requests" && request.method === "POST") {
+        return withCors(request, await createApiAnalysisRequest(request, env, ctx), env);
       }
 
       if (url.pathname === "/api/subscriptions" && request.method === "POST") {
         return withCors(request, await acceptSubscription(request, env, ctx), env);
       }
 
+      if (url.pathname === "/api/internal/subscriptions" && request.method === "POST") {
+        const rawBody = await request.text();
+        const guard = await requireInternalAccess(request, env, rawBody, "website:subscriptions");
+        if (guard) return guard;
+        return await processSubscriptionEvent(request, env, ctx, rawBody);
+      }
+
       if (url.pathname === "/api/internal/access" && request.method === "GET") {
-        const guard = await requireInternalAccess(request, env);
+        const guard = await requireInternalAccess(request, env, "", "matcher:access");
         if (guard) return guard;
         return await internalAccess(url, env);
       }
 
-      if (url.pathname === "/api/internal/analysis-requests" && request.method === "POST") {
-        const guard = await requireInternalAccess(request, env);
+      if ((url.pathname === "/api/internal/access/check" || url.pathname === "/api/internal/access/check/") && request.method === "POST") {
+        const rawBody = await request.text();
+        const guard = await requireInternalAccess(request, env, rawBody, "scanner:access");
         if (guard) return guard;
-        return withCors(request, await recordAnalysisRequest(request, env, ctx), env);
+        return await scannerAccessCheck(rawBody, env);
+      }
+
+      if (url.pathname === "/api/internal/access/cache/commit" && request.method === "POST") {
+        const rawBody = await request.text();
+        const guard = await requireInternalAccess(request, env, rawBody, "scanner:cache");
+        if (guard) return guard;
+        return await commitScannerCache(rawBody, env);
+      }
+
+      if (url.pathname === "/api/internal/deliver" && request.method === "POST") {
+        const rawBody = await request.text();
+        const guard = await requireInternalAccess(request, env, rawBody, "matcher:deliver");
+        if (guard) return guard;
+        return await internalDeliver(request, rawBody, env, ctx);
+      }
+
+      if (url.pathname === "/api/internal/analysis-requests" && request.method === "POST") {
+        const rawBody = await request.text();
+        const guard = await requireInternalAccess(request, env, rawBody, "scanner:history");
+        if (guard) return guard;
+        return withCors(request, await recordAnalysisRequest(request, env, ctx, rawBody), env);
       }
 
       if (url.pathname === "/api/telegram/webhook" && request.method === "POST") {
@@ -327,18 +487,25 @@ async function registerUser(request: Request, env: Env, ctx: ExecutionContext): 
 
   const telegramUserId = telegramUser ? String(telegramUser.id) : submittedTelegramUserId;
   const email = cleanString(body.email)?.toLowerCase() ?? null;
-  if (email && !isValidEmail(email)) return json({ error: "valid_email_required" }, 400);
+  if (!email || !isValidEmail(email)) return json({ error: "valid_email_required" }, 400);
+
+  // An email address is not an identity until a verification provider proves ownership.
+  // Keep email-only signup closed rather than issuing a session to an arbitrary address.
+  if (!telegramUser) {
+    return json({
+      error: "email_verification_required",
+      emailVerificationRequired: true,
+      accountCreated: false
+    }, 403);
+  }
+
   const telegramName = telegramUser ? [telegramUser.first_name, telegramUser.last_name].filter(Boolean).join(" ") : null;
   const displayName = cleanString(body.displayName) ?? telegramName ?? null;
   const language = cleanLanguage(body.language, telegramUser?.language_code ?? env.DEFAULT_LOCALE);
   const countries = cleanCountries(body.countries, body.country, env.DEFAULT_COUNTRY);
   const country = countries[0];
 
-  if (!telegramUserId && !email) {
-    return json({ error: "telegramUserId_or_email_required" }, 400);
-  }
-
-  const existing = await findUser(env, { telegramUserId, email });
+  const existing = await findUser(env, { telegramUserId });
   const userId = existing?.id ?? crypto.randomUUID();
   const countryLinks = await buildCountryLinks(env, countries);
   const primaryBotUrl = countryLinks[0]?.botUrl ?? null;
@@ -347,7 +514,7 @@ async function registerUser(request: Request, env: Env, ctx: ExecutionContext): 
   if (existing) {
     await env.DB.prepare(
       `UPDATE users
-       SET email = COALESCE(?, email),
+       SET pending_email = CASE WHEN email = ? THEN NULL ELSE ? END,
            display_name = COALESCE(?, display_name),
            language = ?,
            country = ?,
@@ -355,11 +522,11 @@ async function registerUser(request: Request, env: Env, ctx: ExecutionContext): 
            updated_at = CURRENT_TIMESTAMP,
            last_seen_at = CURRENT_TIMESTAMP
        WHERE id = ?`
-    ).bind(email, displayName, language, country, primaryBotUrl, userId).run();
+    ).bind(email, email, displayName, language, country, primaryBotUrl, userId).run();
   } else {
     await env.DB.prepare(
-      `INSERT INTO users (id, telegram_user_id, email, display_name, language, country, selected_bot_url, last_seen_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`
+      `INSERT INTO users (id, telegram_user_id, email, pending_email, display_name, language, country, selected_bot_url, last_seen_at)
+       VALUES (?, ?, NULL, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`
     ).bind(userId, telegramUserId, email, displayName, language, country, primaryBotUrl).run();
   }
 
@@ -370,10 +537,175 @@ async function registerUser(request: Request, env: Env, ctx: ExecutionContext): 
   ).bind(userId, language, country).run();
 
   await replaceCountryLinks(env, userId, countryLinks);
+  await persistLegalAcceptances(env, userId, body);
+  const session = await createUserSession(env, userId);
 
   ctx.waitUntil(audit(env, userId, "user", "user.registered", request, { countries, language }));
 
-  return json({ userId, botUrl: primaryBotUrl, countryLinks, access, status: "active" });
+  return jsonWithHeaders(
+    {
+      userId,
+      botUrl: primaryBotUrl,
+      countryLinks,
+      access,
+      status: "active",
+      identityProvider: "telegram",
+      emailVerificationRequired: existing?.email !== email || !existing?.email_verified_at,
+      csrfToken: session.csrfToken
+    },
+    { "Set-Cookie": session.cookie }
+  );
+}
+
+export async function requestEmailVerification(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  if (!env.EMAIL || !env.EMAIL_FROM || !env.EMAIL_VERIFICATION_SECRET || env.EMAIL_VERIFICATION_SECRET.length < 32) {
+    return json({ error: "email_verification_not_configured" }, 503);
+  }
+
+  const body = await readJson<Record<string, unknown>>(request);
+  const email = cleanString(body.email)?.toLowerCase() ?? "";
+  if (!isValidEmail(email)) return json({ error: "valid_email_required" }, 400);
+
+  const session = await optionalSession(request, env);
+  const token = randomSecret(32);
+  const tokenHash = await hmacHex(env.EMAIL_VERIFICATION_SECRET, token);
+  const verificationId = crypto.randomUUID();
+  const expiresAt = new Date(Date.now() + EMAIL_VERIFICATION_TTL_MINUTES * 60 * 1000).toISOString();
+  const countries = cleanCountries(body.countries, body.country, env.DEFAULT_COUNTRY);
+  const payload = {
+    displayName: cleanString(body.displayName),
+    language: cleanLanguage(body.language, env.DEFAULT_LOCALE),
+    countries,
+    acceptances: Array.isArray(body.acceptances) ? body.acceptances.slice(0, 20) : []
+  };
+
+  await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE email_verifications
+       SET consumed_at = CURRENT_TIMESTAMP
+       WHERE email = ? AND consumed_at IS NULL`
+    ).bind(email),
+    env.DB.prepare(
+      `INSERT INTO email_verifications
+       (id, user_id, email, token_hash, purpose, payload_json, expires_at)
+       VALUES (?, ?, ?, ?, 'signup_or_login', ?, ?)`
+    ).bind(verificationId, session?.user.id ?? null, email, tokenHash, JSON.stringify(payload), expiresAt)
+  ]);
+
+  const verificationUrl = new URL("/api/auth/email/verify", request.url);
+  verificationUrl.searchParams.set("token", token);
+  const from = { email: env.EMAIL_FROM, name: env.EMAIL_FROM_NAME ?? env.PUBLIC_APP_NAME };
+  const subject = `Confirm your email for ${env.PUBLIC_APP_NAME}`;
+  const text = `Confirm your email by opening this link within ${EMAIL_VERIFICATION_TTL_MINUTES} minutes:\n\n${verificationUrl.toString()}\n\nIf you did not request this, ignore this email.`;
+  const html = `<p>Confirm your email for <strong>${escapeHtml(env.PUBLIC_APP_NAME)}</strong>.</p><p><a href="${escapeHtml(verificationUrl.toString())}">Confirm email</a></p><p>This link expires in ${EMAIL_VERIFICATION_TTL_MINUTES} minutes. If you did not request it, ignore this email.</p>`;
+
+  try {
+    await env.EMAIL.send({ to: email, from, subject, text, html });
+  } catch {
+    await env.DB.prepare("DELETE FROM email_verifications WHERE id = ? AND consumed_at IS NULL").bind(verificationId).run();
+    return json({ error: "email_delivery_failed" }, 503);
+  }
+
+  ctx.waitUntil(audit(env, session?.user.id ?? null, "user", "email.verification_requested", request, { emailDomain: email.split("@")[1] }));
+  return json({ accepted: true, expiresInSeconds: EMAIL_VERIFICATION_TTL_MINUTES * 60 }, 202);
+}
+
+export async function verifyEmailToken(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  if (!env.EMAIL_VERIFICATION_SECRET || env.EMAIL_VERIFICATION_SECRET.length < 32) {
+    return json({ error: "email_verification_not_configured" }, 503);
+  }
+
+  const token = request.method === "GET"
+    ? cleanString(new URL(request.url).searchParams.get("token"))
+    : cleanString((await readJson<Record<string, unknown>>(request)).token);
+  if (!token || token.length < 32 || token.length > 256) return json({ error: "invalid_email_verification_token" }, 400);
+
+  const tokenHash = await hmacHex(env.EMAIL_VERIFICATION_SECRET, token);
+  const verification = await env.DB.prepare(
+    `SELECT id, user_id, email, payload_json, expires_at, consumed_at
+     FROM email_verifications WHERE token_hash = ?`
+  ).bind(tokenHash).first<{
+    id: string;
+    user_id: string | null;
+    email: string;
+    payload_json: string;
+    expires_at: string;
+    consumed_at: string | null;
+  }>();
+  if (!verification || verification.consumed_at || Date.parse(verification.expires_at) <= Date.now()) {
+    return json({ error: "email_verification_expired_or_used" }, 410);
+  }
+
+  const owner = await env.DB.prepare("SELECT id FROM users WHERE email = ?").bind(verification.email).first<{ id: string }>();
+  if (verification.user_id && owner && owner.id !== verification.user_id) {
+    return json({ error: "email_already_in_use" }, 409);
+  }
+
+  const claim = await env.DB.prepare(
+    `UPDATE email_verifications SET consumed_at = CURRENT_TIMESTAMP
+     WHERE id = ? AND consumed_at IS NULL AND expires_at > CURRENT_TIMESTAMP`
+  ).bind(verification.id).run();
+  if ((claim.meta?.changes ?? 0) !== 1) return json({ error: "email_verification_expired_or_used" }, 410);
+
+  const saved = parseJsonSafe<Record<string, unknown>>(verification.payload_json, {});
+  const language = cleanLanguage(saved.language, env.DEFAULT_LOCALE);
+  const countries = cleanCountries(saved.countries, null, env.DEFAULT_COUNTRY);
+  const country = countries[0];
+  const displayName = cleanString(saved.displayName);
+  const userId = verification.user_id ?? owner?.id ?? crypto.randomUUID();
+  const existingUser = await findUserById(env, userId);
+
+  if (existingUser) {
+    await env.DB.prepare(
+      `UPDATE users SET email = ?, email_verified_at = CURRENT_TIMESTAMP, pending_email = NULL,
+       display_name = COALESCE(?, display_name), language = ?, country = ?, status = 'active',
+       updated_at = CURRENT_TIMESTAMP, last_seen_at = CURRENT_TIMESTAMP WHERE id = ?`
+    ).bind(verification.email, displayName, language, country, userId).run();
+  } else {
+    await env.DB.prepare(
+      `INSERT INTO users
+       (id, email, email_verified_at, display_name, language, country, status, last_seen_at)
+       VALUES (?, ?, CURRENT_TIMESTAMP, ?, ?, ?, 'active', CURRENT_TIMESTAMP)`
+    ).bind(userId, verification.email, displayName, language, country).run();
+  }
+
+  await env.DB.prepare(
+    `INSERT INTO user_settings (user_id, language, country)
+     VALUES (?, ?, ?)
+     ON CONFLICT(user_id) DO UPDATE SET language = excluded.language, country = excluded.country, updated_at = CURRENT_TIMESTAMP`
+  ).bind(userId, language, country).run();
+  const countryLinks = await buildCountryLinks(env, countries);
+  await replaceCountryLinks(env, userId, countryLinks);
+  await persistLegalAcceptances(env, userId, saved);
+
+  const activeSubscription = await env.DB.prepare(
+    `SELECT id FROM subscriptions
+     WHERE user_id = ? AND status IN ('trialing', 'active')
+       AND (current_period_end IS NULL OR current_period_end > CURRENT_TIMESTAMP)
+     LIMIT 1`
+  ).bind(userId).first<{ id: string }>();
+  if (!activeSubscription) {
+    await env.DB.prepare(
+      `INSERT INTO subscriptions
+       (id, user_id, provider, external_id, plan, status, current_period_end, metadata_json, updated_at)
+       VALUES (?, ?, 'core', ?, 'beta', 'active', NULL, '{"free":true,"source":"email_verification"}', CURRENT_TIMESTAMP)
+       ON CONFLICT(id) DO UPDATE SET status = 'active', plan = 'beta', current_period_end = NULL, updated_at = CURRENT_TIMESTAMP`
+    ).bind(`beta_${userId}`, userId, `beta_${userId}`).run();
+  }
+
+  const session = await createUserSession(env, userId);
+  ctx.waitUntil(audit(env, userId, "user", "email.verified", request, { emailDomain: verification.email.split("@")[1], plan: "beta" }));
+
+  if (request.method === "GET") {
+    return new Response(null, { status: 303, headers: { Location: "/dashboard", "Set-Cookie": session.cookie } });
+  }
+  return jsonWithHeaders({ verified: true, userId, plan: "beta", countryLinks, csrfToken: session.csrfToken }, { "Set-Cookie": session.cookie });
+}
+
+async function optionalSession(request: Request, env: Env): Promise<AuthenticatedSession | null> {
+  if (!cookieValue(request, SESSION_COOKIE_NAME)) return null;
+  const session = await requireSession(request, env);
+  return session instanceof Response ? null : session;
 }
 
 export async function health(env: Env): Promise<Response> {
@@ -384,7 +716,18 @@ export async function health(env: Env): Promise<Response> {
     ["subscriptions", "SELECT COUNT(*) AS count FROM subscriptions"],
     ["bot_routes", "SELECT COUNT(*) AS count FROM bot_routes"],
     ["api_keys", "SELECT COUNT(*) AS count FROM api_keys"],
-    ["analysis_requests", "SELECT COUNT(*) AS count FROM analysis_requests"]
+    ["analysis_requests", "SELECT COUNT(*) AS count FROM analysis_requests"],
+    ["user_sessions", "SELECT COUNT(*) AS count FROM user_sessions"],
+    ["legal_acceptances", "SELECT COUNT(*) AS count FROM legal_acceptances"],
+    ["quota_plan_policies", "SELECT COUNT(*) AS count FROM quota_plan_policies"],
+    ["quota_balances", "SELECT COUNT(*) AS count FROM quota_balances"],
+    ["quota_decisions", "SELECT COUNT(*) AS count FROM quota_decisions"],
+    ["quota_decisions_v11", "SELECT COUNT(*) AS count FROM quota_decisions_v11"],
+    ["cache_receipts", "SELECT COUNT(*) AS count FROM cache_receipts"],
+    ["core_cache_entries", "SELECT COUNT(*) AS count FROM core_cache_entries"],
+    ["internal_request_nonces", "SELECT COUNT(*) AS count FROM internal_request_nonces"],
+    ["internal_deliveries", "SELECT COUNT(*) AS count FROM internal_deliveries"],
+    ["email_verifications", "SELECT COUNT(*) AS count FROM email_verifications"]
   ] as const;
 
   await Promise.all(tableChecks.map(async ([name, query]) => {
@@ -432,6 +775,8 @@ async function maybeRateLimit(request: Request, env: Env, url: URL): Promise<Res
 
 function rateLimitRuleFor(request: Request, url: URL): RateLimitRule | null {
   if (url.pathname === "/api/register" && request.method === "POST") return { bucket: "register", limit: 10, windowSeconds: 60 };
+  if (url.pathname === "/api/auth/email/request" && request.method === "POST") return { bucket: "email_verification", limit: 5, windowSeconds: 15 * 60 };
+  if (url.pathname === "/api/auth/email/verify" && request.method === "POST") return { bucket: "email_verify", limit: 10, windowSeconds: 15 * 60 };
   if (url.pathname === "/api/settings" && request.method === "PUT") return { bucket: "settings", limit: 30, windowSeconds: 60 };
   if (url.pathname.startsWith("/api/me/") || url.pathname === "/api/me") return { bucket: "account", limit: 60, windowSeconds: 60 };
   if (url.pathname === "/api/subscriptions" && request.method === "POST") return { bucket: "subscriptions", limit: 60, windowSeconds: 60 };
@@ -440,9 +785,13 @@ function rateLimitRuleFor(request: Request, url: URL): RateLimitRule | null {
 }
 
 async function updateSettings(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const auth = await requireSession(request, env);
+  if (auth instanceof Response) return auth;
+  const csrf = await requireCsrf(request, auth);
+  if (csrf) return csrf;
+
   const body = await readJson<Record<string, unknown>>(request);
-  const userId = cleanString(body.userId);
-  if (!userId) return json({ error: "userId_required" }, 400);
+  const userId = auth.user.id;
 
   const language = cleanLanguage(body.language, env.DEFAULT_LOCALE);
   const countries = cleanCountries(body.countries, body.country, env.DEFAULT_COUNTRY);
@@ -486,6 +835,10 @@ async function acceptSubscription(request: Request, env: Env, ctx: ExecutionCont
   const guard = await requireWebhookSignature(request, env, rawBody);
   if (guard) return guard;
 
+  return processSubscriptionEvent(request, env, ctx, rawBody);
+}
+
+async function processSubscriptionEvent(request: Request, env: Env, ctx: ExecutionContext, rawBody: string): Promise<Response> {
   const body = parseJson<SubscriptionInput>(rawBody);
   const provider = cleanString(body.provider) ?? "external";
   const plan = cleanString(body.plan) ?? "trial";
@@ -504,24 +857,8 @@ async function acceptSubscription(request: Request, env: Env, ctx: ExecutionCont
   if (!userId) {
     const telegramUserId = cleanString(body.telegramUserId);
     const email = cleanString(body.email)?.toLowerCase() ?? null;
-    if (email && !isValidEmail(email)) return json({ error: "valid_email_required" }, 400);
-    if (!telegramUserId && !email) return json({ error: "userId_telegramUserId_or_email_required" }, 400);
-    userId = crypto.randomUUID();
-    const language = cleanLanguage(body.language, env.DEFAULT_LOCALE);
-    const countries = cleanCountries(body.countries, body.country, env.DEFAULT_COUNTRY);
-    const country = countries[0];
-    const countryLinks = await buildCountryLinks(env, countries);
-    const botUrl = countryLinks[0]?.botUrl ?? null;
-    await env.DB.prepare(
-      `INSERT INTO users (id, telegram_user_id, email, display_name, language, country, selected_bot_url, last_seen_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`
-    ).bind(userId, telegramUserId, email, cleanString(body.displayName), language, country, botUrl).run();
-    await env.DB.prepare(
-      `INSERT INTO user_settings (user_id, language, country)
-       VALUES (?, ?, ?)
-       ON CONFLICT(user_id) DO UPDATE SET language = excluded.language, country = excluded.country, updated_at = CURRENT_TIMESTAMP`
-    ).bind(userId, language, country).run();
-    await replaceCountryLinks(env, userId, countryLinks);
+    if (!email || !isValidEmail(email)) return json({ error: "valid_email_required" }, 400);
+    return json({ error: "verified_user_required", emailVerificationRequired: true }, 409);
   }
 
   const subscriptionId = crypto.randomUUID();
@@ -541,21 +878,22 @@ async function acceptSubscription(request: Request, env: Env, ctx: ExecutionCont
   return json({ subscriptionId, userId, status, botUrl, countryLinks, access });
 }
 
-async function accountDetails(url: URL, env: Env): Promise<Response> {
-  const userId = cleanString(url.searchParams.get("userId"));
-  const email = cleanString(url.searchParams.get("email"))?.toLowerCase() ?? null;
-  if (email && !isValidEmail(email)) return json({ error: "valid_email_required" }, 400);
-  const user = userId ? await findUserById(env, userId) : await findUser(env, { email });
-  if (!user) return json({ error: "user_not_found" }, 404);
-  const countryLinks = await listCountryLinks(env, user.id);
-  return json({ user, countryLinks });
+async function accountDetails(request: Request, env: Env): Promise<Response> {
+  const auth = await requireSession(request, env);
+  if (auth instanceof Response) return auth;
+  const countryLinks = await listCountryLinks(env, auth.user.id);
+  return json({ user: auth.user, countryLinks, csrfTokenRequired: true });
 }
 
 async function deleteCountryLink(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const auth = await requireSession(request, env);
+  if (auth instanceof Response) return auth;
+  const csrf = await requireCsrf(request, auth);
+  if (csrf) return csrf;
+
   const body = await readJson<Record<string, unknown>>(request);
-  const userId = cleanString(body.userId);
+  const userId = auth.user.id;
   const country = cleanCountry(body.country, "");
-  if (!userId) return json({ error: "userId_required" }, 400);
   if (!country) return json({ error: "country_required" }, 400);
 
   await env.DB.prepare(
@@ -579,9 +917,10 @@ async function deleteCountryLink(request: Request, env: Env, ctx: ExecutionConte
   return json({ userId, removedCountry: country, countryLinks: remaining });
 }
 
-async function userDashboard(url: URL, env: Env): Promise<Response> {
-  const user = await resolveUserFromUrl(url, env);
-  if (!user) return json({ error: "user_not_found" }, 404);
+async function userDashboard(request: Request, env: Env): Promise<Response> {
+  const auth = await requireSession(request, env);
+  if (auth instanceof Response) return auth;
+  const user = auth.user;
 
   const [countryLinks, subscription, apiKeys, history] = await Promise.all([
     listCountryLinks(env, user.id),
@@ -601,16 +940,19 @@ async function userDashboard(url: URL, env: Env): Promise<Response> {
 }
 
 async function updateUserProfile(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-  const body = await readJson<Record<string, unknown>>(request);
-  const userId = cleanString(body.userId);
-  if (!userId) return json({ error: "userId_required" }, 400);
+  const auth = await requireSession(request, env);
+  if (auth instanceof Response) return auth;
+  const csrf = await requireCsrf(request, auth);
+  if (csrf) return csrf;
 
-  const existing = await findUserById(env, userId);
-  if (!existing) return json({ error: "user_not_found" }, 404);
+  const body = await readJson<Record<string, unknown>>(request);
+  const userId = auth.user.id;
+
+  const existing = auth.user;
 
   const emailInput = cleanString(body.email);
   const email = emailInput ? emailInput.toLowerCase() : existing.email;
-  if (email && !isValidEmail(email)) return json({ error: "valid_email_required" }, 400);
+  if (!email || !isValidEmail(email)) return json({ error: "valid_email_required" }, 400);
 
   const displayName = cleanString(body.displayName) ?? existing.display_name;
   const language = cleanLanguage(body.language, existing.language);
@@ -620,7 +962,7 @@ async function updateUserProfile(request: Request, env: Env, ctx: ExecutionConte
 
   await env.DB.prepare(
     `UPDATE users
-     SET email = ?,
+     SET pending_email = CASE WHEN email = ? THEN NULL ELSE ? END,
          display_name = ?,
          language = ?,
          country = ?,
@@ -628,7 +970,7 @@ async function updateUserProfile(request: Request, env: Env, ctx: ExecutionConte
          updated_at = CURRENT_TIMESTAMP,
          last_seen_at = CURRENT_TIMESTAMP
      WHERE id = ?`
-  ).bind(email, displayName, language, primary.country, primary.botUrl, userId).run();
+  ).bind(email, email, displayName, language, primary.country, primary.botUrl, userId).run();
 
   await env.DB.prepare(
     `INSERT INTO user_settings (user_id, language, country)
@@ -640,12 +982,18 @@ async function updateUserProfile(request: Request, env: Env, ctx: ExecutionConte
   ctx.waitUntil(audit(env, userId, "user", "profile.updated", request, { countries, language }));
 
   const user = await findUserById(env, userId);
-  return json({ user, countryLinks, subscription: await latestSubscription(env, userId) });
+  return json({
+    user,
+    countryLinks,
+    subscription: await latestSubscription(env, userId),
+    emailVerificationRequired: user?.email !== email || !user?.email_verified_at
+  });
 }
 
-async function userSubscription(url: URL, env: Env): Promise<Response> {
-  const user = await resolveUserFromUrl(url, env);
-  if (!user) return json({ error: "user_not_found" }, 404);
+async function userSubscription(request: Request, env: Env): Promise<Response> {
+  const auth = await requireSession(request, env);
+  if (auth instanceof Response) return auth;
+  const user = auth.user;
 
   const result = await env.DB.prepare(
     `SELECT id, provider, external_id, plan, status, current_period_end, created_at, updated_at
@@ -664,32 +1012,42 @@ async function userSubscription(url: URL, env: Env): Promise<Response> {
   });
 }
 
-async function userApiKeys(url: URL, env: Env): Promise<Response> {
-  const user = await resolveUserFromUrl(url, env);
-  if (!user) return json({ error: "user_not_found" }, 404);
+async function userApiKeys(request: Request, env: Env): Promise<Response> {
+  const auth = await requireSession(request, env);
+  if (auth instanceof Response) return auth;
+  const user = auth.user;
   return json({ userId: user.id, apiKeys: await listApiKeys(env, user.id) });
 }
 
 async function createUserApiKey(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-  const body = await readJson<Record<string, unknown>>(request);
-  const userId = cleanString(body.userId);
-  if (!userId) return json({ error: "userId_required" }, 400);
+  const auth = await requireSession(request, env);
+  if (auth instanceof Response) return auth;
+  const csrf = await requireCsrf(request, auth);
+  if (csrf) return csrf;
 
-  const user = await findUserById(env, userId);
-  if (!user) return json({ error: "user_not_found" }, 404);
+  const body = await readJson<Record<string, unknown>>(request);
+  const userId = auth.user.id;
+
+  const user = auth.user;
   if (user.status !== "active") return json({ error: "user_not_active" }, 403);
+  if (!env.API_KEY_HASH_SECRET) return json({ error: "api_key_hash_secret_not_configured" }, 503);
 
   const name = cleanString(body.name) ?? "Default key";
-  const scopes = Array.isArray(body.scopes) ? body.scopes.map(cleanString).filter(isString).slice(0, 20) : ["analysis:read", "analysis:write"];
-  const expiresAt = cleanString(body.expiresAt);
+  const scopes = Array.isArray(body.scopes) ? body.scopes.map(cleanString).filter(isString) : [...API_KEY_SCOPES];
+  if (!scopes.length || scopes.length > API_KEY_SCOPES.length || scopes.some((scope) => !API_KEY_SCOPES.includes(scope as typeof API_KEY_SCOPES[number]))) {
+    return json({ error: "invalid_api_key_scopes", allowedScopes: API_KEY_SCOPES }, 400);
+  }
+  const expiry = parseFutureIsoTimestamp(body.expiresAt);
+  if (!expiry.ok) return json({ error: "invalid_api_key_expiry" }, 400);
+  const expiresAt = expiry.value;
   const rawKey = `msk_live_${randomSecret(32)}`;
   const keyId = crypto.randomUUID();
   const keyPrefix = rawKey.slice(0, 18);
-  const keyHash = await sha256(rawKey);
+  const keyHash = await hmacHex(env.API_KEY_HASH_SECRET, rawKey);
 
   await env.DB.prepare(
-    `INSERT INTO api_keys (id, user_id, name, key_prefix, key_hash, scopes_json, expires_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO api_keys (id, user_id, name, key_prefix, key_hash, scopes_json, expires_at, hash_version)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'hmac_sha256_v1')`
   ).bind(keyId, userId, name, keyPrefix, keyHash, JSON.stringify(scopes), expiresAt).run();
 
   ctx.waitUntil(audit(env, userId, "user", "api_key.created", request, { keyId, keyPrefix, name }));
@@ -708,11 +1066,73 @@ async function createUserApiKey(request: Request, env: Env, ctx: ExecutionContex
   }, 201);
 }
 
-async function revokeUserApiKey(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+async function createApiAnalysisRequest(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const identity = await requireApiKey(request, env, "analysis:write");
+  if (identity instanceof Response) return identity;
+
+  const limited = await enforceApiAnalysisLimits(request, env, identity);
+  if (limited) return limited;
+
   const body = await readJson<Record<string, unknown>>(request);
-  const userId = cleanString(body.userId);
+  const requestId = cleanString(body.requestId) ?? crypto.randomUUID();
+  const ticker = cleanString(body.ticker)?.toUpperCase() ?? "";
+  const reportType = body.reportType === "fundrep" ? "fundrep" : body.reportType === undefined || body.reportType === "regular" ? "regular" : null;
+  const forceRefresh = body.forceRefresh === true;
+  const language = cleanInternalLanguage(body.language) || "en";
+  if (!requestId || requestId.length > 128 || !ticker || ticker.length > 32 || !/^[A-Z0-9._:-]+$/.test(ticker)) {
+    return json({ error: "invalid_analysis_request" }, 400);
+  }
+  if (!reportType) return json({ error: "unsupported_report_type" }, 400);
+
+  const quotaResponse = await scannerAccessCheck(JSON.stringify({
+    contractVersion: "1.1",
+    requestId,
+    userId: identity.userId,
+    chatId: null,
+    ticker,
+    reportType,
+    generationVersion: cleanString(body.generationVersion) ?? "public-api-v1",
+    cacheStatus: "miss",
+    cacheCreatedAt: null,
+    cacheGenerationVersion: null,
+    forceRefresh,
+    language
+  }), env);
+  const quota = await quotaResponse.json<Record<string, unknown>>();
+  if (!quotaResponse.ok || quota.allowed !== true) {
+    return json({ error: "analysis_access_denied", ...quota }, quotaResponse.status >= 400 ? quotaResponse.status : 403);
+  }
+
+  await env.DB.prepare(
+    `INSERT INTO analysis_requests
+     (id, user_id, api_key_id, request_id, source, country, language, status, tickers_json, request_json, response_json)
+     VALUES (?, ?, ?, ?, 'public_api', NULL, ?, 'received', ?, ?, '{}')
+     ON CONFLICT(request_id) DO NOTHING`
+  ).bind(
+    crypto.randomUUID(),
+    identity.userId,
+    identity.id,
+    requestId,
+    language,
+    JSON.stringify([ticker]),
+    JSON.stringify({ ticker, reportType, forceRefresh, language })
+  ).run();
+
+  await env.DB.prepare("UPDATE api_keys SET last_used_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(identity.id).run();
+  await recordApiUsage(env, { userId: identity.userId, apiKeyId: identity.id, endpoint: "analysis.requests" });
+  ctx.waitUntil(audit(env, identity.userId, "api_key", "analysis_request.authorized", request, { requestId, ticker, reportType }));
+  return json({ requestId, status: "accepted", ticker, reportType, quota }, 202);
+}
+
+async function revokeUserApiKey(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const auth = await requireSession(request, env);
+  if (auth instanceof Response) return auth;
+  const csrf = await requireCsrf(request, auth);
+  if (csrf) return csrf;
+
+  const body = await readJson<Record<string, unknown>>(request);
+  const userId = auth.user.id;
   const keyId = cleanString(body.keyId);
-  if (!userId) return json({ error: "userId_required" }, 400);
   if (!keyId) return json({ error: "keyId_required" }, 400);
 
   await env.DB.prepare(
@@ -725,15 +1145,62 @@ async function revokeUserApiKey(request: Request, env: Env, ctx: ExecutionContex
   return json({ userId, keyId, revoked: true, apiKeys: await listApiKeys(env, userId) });
 }
 
-async function userAnalysisHistory(url: URL, env: Env): Promise<Response> {
-  const user = await resolveUserFromUrl(url, env);
-  if (!user) return json({ error: "user_not_found" }, 404);
+async function rotateUserApiKey(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const auth = await requireSession(request, env);
+  if (auth instanceof Response) return auth;
+  const csrf = await requireCsrf(request, auth);
+  if (csrf) return csrf;
+  if (!env.API_KEY_HASH_SECRET) return json({ error: "api_key_hash_secret_not_configured" }, 503);
+
+  const body = await readJson<Record<string, unknown>>(request);
+  const oldKeyId = cleanString(body.keyId);
+  if (!oldKeyId) return json({ error: "keyId_required" }, 400);
+  const oldKey = await env.DB.prepare(
+    `SELECT id, name, scopes_json FROM api_keys
+     WHERE id = ? AND user_id = ? AND is_active = 1`
+  ).bind(oldKeyId, auth.user.id).first<{ id: string; name: string; scopes_json: string }>();
+  if (!oldKey) return json({ error: "api_key_not_found" }, 404);
+
+  const scopes = Array.isArray(body.scopes) ? body.scopes.map(cleanString).filter(isString) : parseJsonSafe<string[]>(oldKey.scopes_json, []);
+  if (!scopes.length || scopes.length > API_KEY_SCOPES.length || scopes.some((scope) => !API_KEY_SCOPES.includes(scope as typeof API_KEY_SCOPES[number]))) {
+    return json({ error: "invalid_api_key_scopes", allowedScopes: API_KEY_SCOPES }, 400);
+  }
+  const name = cleanString(body.name) ?? oldKey.name;
+  const expiry = parseFutureIsoTimestamp(body.expiresAt);
+  if (!expiry.ok) return json({ error: "invalid_api_key_expiry" }, 400);
+  const expiresAt = expiry.value;
+  const rawKey = `msk_live_${randomSecret(32)}`;
+  const keyId = crypto.randomUUID();
+  const keyPrefix = rawKey.slice(0, 18);
+  const keyHash = await hmacHex(env.API_KEY_HASH_SECRET, rawKey);
+
+  await env.DB.batch([
+    env.DB.prepare("UPDATE api_keys SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?").bind(oldKeyId, auth.user.id),
+    env.DB.prepare(
+      `INSERT INTO api_keys (id, user_id, name, key_prefix, key_hash, scopes_json, expires_at, hash_version)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'hmac_sha256_v1')`
+    ).bind(keyId, auth.user.id, name, keyPrefix, keyHash, JSON.stringify(scopes), expiresAt)
+  ]);
+
+  ctx.waitUntil(audit(env, auth.user.id, "user", "api_key.rotated", request, { oldKeyId, keyId, keyPrefix, name }));
+  return json({
+    replacedKeyId: oldKeyId,
+    apiKey: { id: keyId, name, keyPrefix, scopes, expiresAt, isActive: true, token: rawKey },
+    warning: "The previous key was revoked. Store this replacement token now; it will not be shown again."
+  }, 201);
+}
+
+async function userAnalysisHistory(request: Request, env: Env): Promise<Response> {
+  const auth = await requireSession(request, env);
+  if (auth instanceof Response) return auth;
+  const user = auth.user;
+  const url = new URL(request.url);
   const limit = Math.min(Math.max(Number(url.searchParams.get("limit") ?? 25), 1), 100);
   return json({ userId: user.id, analysisHistory: await listAnalysisHistory(env, user.id, limit) });
 }
 
-async function recordAnalysisRequest(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-  const body = await readJson<AnalysisRequestInput>(request);
+async function recordAnalysisRequest(request: Request, env: Env, ctx: ExecutionContext, rawBody?: string): Promise<Response> {
+  const body = rawBody ? JSON.parse(rawBody) as AnalysisRequestInput : await readJson<AnalysisRequestInput>(request);
   let userId = cleanString(body.userId);
   if (!userId) {
     const user = await findUser(env, {
@@ -825,6 +1292,530 @@ export async function internalAccess(url: URL, env: Env): Promise<Response> {
     subscriptionStatus,
     botUrl: reason === null ? botUrl : null
   });
+}
+
+export async function internalDeliver(request: Request, rawBody: string, env: Env, ctx: ExecutionContext): Promise<Response> {
+  let input: unknown;
+  try {
+    input = JSON.parse(rawBody);
+  } catch {
+    return json({ error: "invalid_delivery_request" }, 400);
+  }
+  if (!isExactRecord(input, ["contractVersion", "requestId", "deliveryId", "recipient", "content"])) {
+    return json({ error: "invalid_delivery_request" }, 400);
+  }
+
+  const recipient = input.recipient;
+  const content = input.content;
+  if (!isRecord(recipient) || !isRecord(content)) return json({ error: "invalid_delivery_request" }, 400);
+  const recipientType = recipient.type;
+  const recipientKeys = recipientType === "user" ? ["type", "userId", "country", "language"] : ["type", "routeId", "country", "language"];
+  if ((recipientType !== "user" && recipientType !== "channel") || !isExactRecord(recipient, recipientKeys)) {
+    return json({ error: "invalid_delivery_recipient" }, 400);
+  }
+  if (!isExactRecord(content, ["kind", "text", "ticker", "reportType"])) return json({ error: "invalid_delivery_content" }, 400);
+
+  const requestId = cleanString(input.requestId) ?? "";
+  const deliveryId = cleanString(input.deliveryId) ?? "";
+  const country = cleanCountry(recipient.country, "");
+  const language = cleanInternalLanguage(recipient.language);
+  const text = cleanString(content.text) ?? "";
+  const kind = content.kind === "news_signal" || content.kind === "ticker_analysis" || content.kind === "service_notice" ? content.kind : null;
+  const ticker = content.ticker === null ? null : cleanString(content.ticker)?.toUpperCase() ?? null;
+  const reportType = content.reportType === null ? null : content.reportType === "regular" || content.reportType === "fundrep" ? content.reportType : undefined;
+  if (input.contractVersion !== "1.0" || !requestId || requestId.length > 128 || !deliveryId || deliveryId.length > 128 || !country || !language) {
+    return json({ error: "invalid_delivery_request" }, 400);
+  }
+  if (!kind || !text || text.length > 4096 || reportType === undefined || (ticker !== null && (!/^[A-Z0-9._:-]+$/.test(ticker) || ticker.length > 32))) {
+    return json({ error: "invalid_delivery_content" }, 400);
+  }
+  if (/bot\d{6,}:[A-Za-z0-9_-]{20,}|\bBearer\s+\S+|\bX-Signature\s*:/i.test(text)) {
+    return json({ error: "delivery_secret_like_content_rejected" }, 400);
+  }
+
+  const recipientId = recipientType === "user" ? cleanString(recipient.userId) : cleanString(recipient.routeId);
+  if (!recipientId) return json({ error: "invalid_delivery_recipient" }, 400);
+  const payload: InternalDeliveryRequest = {
+    contractVersion: "1.0",
+    requestId,
+    deliveryId,
+    recipient: recipientType === "user"
+      ? { type: "user", userId: recipientId, country, language }
+      : { type: "channel", routeId: recipientId, country, language },
+    content: { kind, text, ticker, reportType }
+  };
+  const payloadHash = await sha256(JSON.stringify(payload));
+
+  await env.DB.prepare(
+    `INSERT OR IGNORE INTO internal_deliveries
+     (delivery_id, request_id, payload_hash, recipient_type, recipient_id, user_id, country, language, content_kind)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).bind(deliveryId, requestId, payloadHash, recipientType, recipientId, recipientType === "user" ? recipientId : null, country, language, kind).run();
+
+  let ledger = await findDelivery(env, deliveryId);
+  if (!ledger) return json({ error: "delivery_ledger_unavailable" }, 503);
+  if (ledger.payload_hash !== payloadHash) return json({ error: "delivery_id_payload_mismatch" }, 400);
+  if (ledger.status === "sent") return deliveryResponse(ledger, "duplicate");
+  if (ledger.status === "access_denied") return deliveryResponse(ledger, "access_denied");
+  if (ledger.status === "sending" || ledger.status === "indeterminate") {
+    return json({ error: ledger.status === "sending" ? "delivery_in_progress" : "delivery_state_indeterminate", retryable: false }, 409);
+  }
+
+  let chatId: string | null = null;
+  let accessReason: string | null = null;
+  if (recipientType === "user") {
+    const user = await env.DB.prepare("SELECT id, telegram_user_id, status FROM users WHERE id = ?").bind(recipientId).first<{ id: string; telegram_user_id: string | null; status: string }>();
+    const option = NEWS_CHAT_OPTIONS.find((item) => item.country === country && item.language === language);
+    const link = user ? await findCountryLink(env, user.id, country) : null;
+    const subscription = user ? await latestSubscription(env, user.id) : null;
+    if (!user || user.status !== "active") accessReason = "user_not_found";
+    else if (!option) accessReason = "unsupported_country_language";
+    else if (!link) accessReason = "country_not_linked";
+    else if (!isSubscriptionCurrentlyAllowed(subscription)) accessReason = subscriptionAccessReason(subscription);
+    else if (!user.telegram_user_id) accessReason = "telegram_destination_not_linked";
+    else chatId = user.telegram_user_id;
+  } else {
+    const route = await env.DB.prepare(
+      `SELECT route_id, country, language, telegram_chat_id, is_active
+       FROM bot_routes WHERE route_id = ?`
+    ).bind(recipientId).first<{ route_id: string; country: string; language: string; telegram_chat_id: string | null; is_active: number }>();
+    if (!route || !route.is_active || route.country !== country || route.language !== language) accessReason = "channel_route_not_found";
+    else if (!route.telegram_chat_id) accessReason = "channel_destination_not_configured";
+    else chatId = route.telegram_chat_id;
+  }
+
+  if (accessReason || !chatId) {
+    await env.DB.prepare(
+      `UPDATE internal_deliveries SET status = 'access_denied', failure_reason = ?, updated_at = CURRENT_TIMESTAMP
+       WHERE delivery_id = ? AND status IN ('pending', 'failed')`
+    ).bind(accessReason ?? "delivery_access_denied", deliveryId).run();
+    ledger = await findDelivery(env, deliveryId) ?? ledger;
+    ctx.waitUntil(audit(env, recipientType === "user" ? recipientId : null, "matcher", "delivery.access_denied", request, { deliveryId, reason: accessReason }));
+    return deliveryResponse(ledger, "access_denied");
+  }
+
+  const claim = await env.DB.prepare(
+    `UPDATE internal_deliveries SET status = 'sending', attempts = attempts + 1, failure_reason = NULL, updated_at = CURRENT_TIMESTAMP
+     WHERE delivery_id = ? AND payload_hash = ? AND status IN ('pending', 'failed')`
+  ).bind(deliveryId, payloadHash).run();
+  if ((claim.meta?.changes ?? 0) !== 1) return json({ error: "delivery_in_progress", retryable: false }, 409);
+
+  try {
+    const messageId = await sendDeliveryTelegramMessage(env, chatId, text);
+    await env.DB.prepare(
+      `UPDATE internal_deliveries SET status = 'sent', telegram_message_id = ?, sent_at = CURRENT_TIMESTAMP,
+       updated_at = CURRENT_TIMESTAMP WHERE delivery_id = ? AND status = 'sending'`
+    ).bind(messageId, deliveryId).run();
+    ledger = await findDelivery(env, deliveryId) ?? ledger;
+    ctx.waitUntil(audit(env, recipientType === "user" ? recipientId : null, "matcher", "delivery.sent", request, { deliveryId, kind, country, language }));
+    return deliveryResponse(ledger, "sent");
+  } catch (error) {
+    const known = error instanceof TelegramDeliveryError ? error : new TelegramDeliveryError("telegram_delivery_indeterminate", false);
+    const status = known.retrySafe ? "failed" : "indeterminate";
+    await env.DB.prepare(
+      `UPDATE internal_deliveries SET status = ?, failure_reason = ?, updated_at = CURRENT_TIMESTAMP
+       WHERE delivery_id = ? AND status = 'sending'`
+    ).bind(status, known.code, deliveryId).run();
+    ctx.waitUntil(audit(env, recipientType === "user" ? recipientId : null, "matcher", "delivery.failed", request, { deliveryId, reason: known.code, retryable: known.retrySafe }));
+    return json({ contractVersion: "1.0", requestId, deliveryId, status: "failed", telegramMessageId: null, reason: known.code, sentAt: null, retryable: known.retrySafe }, 503);
+  }
+}
+
+async function findDelivery(env: Env, deliveryId: string): Promise<DeliveryLedgerRow | null> {
+  return env.DB.prepare(
+    `SELECT delivery_id, request_id, payload_hash, status, telegram_message_id, failure_reason, sent_at
+     FROM internal_deliveries WHERE delivery_id = ?`
+  ).bind(deliveryId).first<DeliveryLedgerRow>();
+}
+
+function deliveryResponse(row: DeliveryLedgerRow, status: "sent" | "duplicate" | "access_denied"): Response {
+  return json({
+    contractVersion: "1.0",
+    requestId: row.request_id,
+    deliveryId: row.delivery_id,
+    status,
+    telegramMessageId: row.telegram_message_id,
+    reason: status === "access_denied" ? row.failure_reason : null,
+    sentAt: row.sent_at
+  });
+}
+
+export async function scannerAccessCheck(rawBody: string, env: Env): Promise<Response> {
+  let input: Record<string, unknown>;
+  try {
+    input = JSON.parse(rawBody) as Record<string, unknown>;
+  } catch {
+    return scannerAccessResponse("", false, 0, "rejected_no_access", "miss", "none", null, "invalid_request", 400);
+  }
+
+  const requestId = cleanString(input.requestId) ?? "";
+  if (input.contractVersion !== "1.1") {
+    return scannerAccessResponse(requestId, false, 0, "rejected_no_access", "miss", "none", null, "invalid_contract_version", 400);
+  }
+  if (input.reportType !== "regular" && input.reportType !== "fundrep") {
+    return scannerAccessResponse(requestId, false, 0, "rejected_no_access", "miss", "none", null, "unsupported_report_type", 400);
+  }
+
+  const userId = cleanString(input.userId);
+  const chatId = input.chatId === null ? null : cleanString(input.chatId);
+  const ticker = cleanString(input.ticker)?.toUpperCase() ?? "";
+  const language = cleanInternalLanguage(input.language);
+  const generationVersion = cleanString(input.generationVersion);
+  const cacheCreatedAt = input.cacheCreatedAt === null ? null : cleanString(input.cacheCreatedAt);
+  const cacheGenerationVersion = input.cacheGenerationVersion === null ? null : cleanString(input.cacheGenerationVersion);
+  if (!requestId || requestId.length > 128 || !userId || userId.length > 128 ||
+      (input.chatId !== null && !chatId) || !ticker || ticker.length > 32 ||
+      !/^[A-Z0-9._:-]+$/.test(ticker) || !language || !["ru", "en", "he"].includes(language) ||
+      !generationVersion || generationVersion.length > 128 ||
+      (input.cacheStatus !== "hit" && input.cacheStatus !== "miss") ||
+      (input.cacheCreatedAt !== null && !cacheCreatedAt) ||
+      (input.cacheGenerationVersion !== null && !cacheGenerationVersion) ||
+      typeof input.forceRefresh !== "boolean") {
+    return scannerAccessResponse(requestId, false, 0, "rejected_no_access", "miss", "none", null, "invalid_request", 400);
+  }
+
+  const payload: ScannerAccessCheckRequest = {
+    contractVersion: "1.1",
+    requestId,
+    userId,
+    chatId,
+    ticker,
+    reportType: input.reportType,
+    generationVersion,
+    cacheStatus: input.cacheStatus,
+    cacheCreatedAt,
+    cacheGenerationVersion,
+    forceRefresh: input.forceRefresh,
+    language: language as ScannerAccessCheckRequest["language"]
+  };
+  const payloadHash = await sha256(JSON.stringify(payload));
+  const existing = await findQuotaDecisionV11(env, requestId, ticker);
+  if (existing) {
+    if (existing.payload_hash !== payloadHash) {
+      return scannerAccessResponse(requestId, false, 0, "rejected_no_access", existing.effective_cache_status, "none", creditsToUnits(existing.remaining_credits), "invalid_request", 400);
+    }
+    return quotaDecisionResponseV11(existing, true);
+  }
+
+  const initialCacheStatus = payload.forceRefresh ? "bypass" : "miss";
+
+  const user = await env.DB.prepare("SELECT id, status FROM users WHERE id = ?").bind(userId).first<{ id: string; status: string }>();
+  if (!user || user.status !== "active") {
+    return scannerAccessResponse(requestId, false, 0, "rejected_no_access", initialCacheStatus, "none", null, "user_not_found");
+  }
+
+  const subscription = await env.DB.prepare(
+    `SELECT id, plan, status, current_period_end
+     FROM subscriptions
+     WHERE user_id = ?
+     ORDER BY created_at DESC
+     LIMIT 1`
+  ).bind(userId).first<{ id: string; plan: string; status: string; current_period_end: string | null }>();
+  const normalizedSubscription = subscription
+    ? { status: subscription.status, currentPeriodEnd: subscription.current_period_end }
+    : null;
+  if (!isSubscriptionCurrentlyAllowed(normalizedSubscription)) {
+    return persistRejectedQuotaDecisionV11(env, payload, payloadHash, subscription?.id ?? null, initialCacheStatus, subscriptionAccessReason(normalizedSubscription));
+  }
+
+  const policy = await env.DB.prepare(
+    `SELECT period_units, period_credits, regular_new_credits, regular_cached_credits,
+            fundrep_new_credits, fundrep_cached_credits, cache_ttl_minutes
+     FROM quota_plan_policies
+     WHERE plan = ? AND is_active = 1`
+  ).bind(subscription!.plan).first<{
+    period_units: number;
+    period_credits: number;
+    regular_new_credits: number;
+    regular_cached_credits: number;
+    fundrep_new_credits: number;
+    fundrep_cached_credits: number;
+    cache_ttl_minutes: number;
+  }>();
+  if (!policy) {
+    return scannerAccessResponse(requestId, false, 0, "rejected_no_access", initialCacheStatus, "none", null, "internal_access_unavailable", 503);
+  }
+
+  const committedCache = payload.forceRefresh ? null : await env.DB.prepare(
+    `SELECT id FROM core_cache_entries
+     WHERE user_id = ? AND ticker = ? AND report_type = ? AND generation_version = ? AND language = ?
+       AND expires_at >= ?
+     ORDER BY created_at DESC LIMIT 1`
+  ).bind(userId, ticker, payload.reportType, generationVersion, language, new Date().toISOString()).first<{ id: string }>();
+  const cacheStatus: "hit" | "miss" | "bypass" = payload.forceRefresh ? "bypass" : committedCache ? "hit" : "miss";
+  const scenario = quotaScenario(payload.reportType, cacheStatus);
+  const chargeCredits = payload.reportType === "fundrep"
+    ? (cacheStatus === "hit" ? policy.fundrep_cached_credits : policy.fundrep_new_credits)
+    : (cacheStatus === "hit" ? policy.regular_cached_credits : policy.regular_new_credits);
+  const receiptId = cacheStatus === "hit" ? null : crypto.randomUUID();
+  const receiptCommitExpiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+  const quotaStatements = [
+    env.DB.prepare(
+      `INSERT INTO quota_balances (subscription_id, user_id, quota_limit, used_units, period_end, quota_limit_credits, used_credits)
+       VALUES (?, ?, ?, 0, ?, ?, 0)
+       ON CONFLICT(subscription_id) DO UPDATE SET
+         quota_limit_credits = excluded.quota_limit_credits,
+         used_credits = MAX(used_credits, used_units * 2)`
+    ).bind(subscription!.id, userId, policy.period_units, subscription!.current_period_end, policy.period_credits),
+    env.DB.prepare(
+      `INSERT OR IGNORE INTO quota_decisions_v11
+       (request_id, ticker, payload_hash, user_id, subscription_id, chat_id, report_type, generation_version,
+        signed_cache_status, cache_created_at, cache_generation_version, force_refresh, language, effective_cache_status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(
+      requestId, ticker, payloadHash, userId, subscription!.id, chatId, payload.reportType, generationVersion,
+      payload.cacheStatus, cacheCreatedAt, cacheGenerationVersion, payload.forceRefresh ? 1 : 0, language, cacheStatus
+    ),
+    env.DB.prepare(
+      `UPDATE quota_decisions_v11
+       SET quota_decision = 'approved_unsettled', updated_at = CURRENT_TIMESTAMP
+       WHERE request_id = ? AND ticker = ? AND payload_hash = ? AND quota_decision = 'pending'
+         AND EXISTS (
+           SELECT 1 FROM quota_balances
+           WHERE subscription_id = ? AND used_credits + ? <= quota_limit_credits
+         )`
+    ).bind(requestId, ticker, payloadHash, subscription!.id, chargeCredits),
+    env.DB.prepare(
+      `UPDATE quota_balances
+       SET used_credits = used_credits + ?, updated_at = CURRENT_TIMESTAMP
+       WHERE subscription_id = ?
+         AND EXISTS (
+           SELECT 1 FROM quota_decisions_v11
+           WHERE request_id = ? AND ticker = ? AND payload_hash = ? AND quota_decision = 'approved_unsettled'
+         )`
+    ).bind(chargeCredits, subscription!.id, requestId, ticker, payloadHash),
+    env.DB.prepare(
+      `UPDATE quota_decisions_v11
+       SET allowed = 1, charge_credits = ?, quota_decision = ?, report_source = ?,
+           remaining_credits = (SELECT quota_limit_credits - used_credits FROM quota_balances WHERE subscription_id = ?),
+           reason = NULL, updated_at = CURRENT_TIMESTAMP
+       WHERE request_id = ? AND ticker = ? AND payload_hash = ? AND quota_decision = 'approved_unsettled'`
+    ).bind(chargeCredits, scenario.decision, scenario.reportSource, subscription!.id, requestId, ticker, payloadHash),
+    env.DB.prepare(
+      `UPDATE quota_decisions_v11
+       SET allowed = 0, charge_credits = 0, quota_decision = 'rejected_no_quota', report_source = 'none',
+           remaining_credits = (SELECT quota_limit_credits - used_credits FROM quota_balances WHERE subscription_id = ?),
+           reason = 'quota_exceeded', updated_at = CURRENT_TIMESTAMP
+       WHERE request_id = ? AND ticker = ? AND payload_hash = ? AND quota_decision = 'pending'`
+    ).bind(subscription!.id, requestId, ticker, payloadHash)
+  ];
+  if (receiptId) {
+    quotaStatements.push(
+      env.DB.prepare(
+        `INSERT OR IGNORE INTO cache_receipts
+         (id, request_id, ticker, user_id, subscription_id, report_type, generation_version, language,
+          cache_ttl_minutes, status, commit_expires_at)
+         SELECT ?, d.request_id, d.ticker, d.user_id, d.subscription_id, d.report_type, d.generation_version, d.language,
+                ?, 'pending', ?
+         FROM quota_decisions_v11 d
+         WHERE d.request_id = ? AND d.ticker = ? AND d.payload_hash = ? AND d.allowed = 1
+           AND d.quota_decision IN ('new_regular', 'refresh_regular', 'new_fundrep', 'refresh_fundrep')`
+      ).bind(receiptId, policy.cache_ttl_minutes, receiptCommitExpiresAt, requestId, ticker, payloadHash),
+      env.DB.prepare(
+        `UPDATE quota_decisions_v11
+         SET cache_receipt_id = (
+           SELECT id FROM cache_receipts WHERE request_id = ? AND ticker = ?
+         ), updated_at = CURRENT_TIMESTAMP
+         WHERE request_id = ? AND ticker = ? AND payload_hash = ? AND allowed = 1`
+      ).bind(requestId, ticker, requestId, ticker, payloadHash)
+    );
+  }
+  await env.DB.batch(quotaStatements);
+
+  const decision = await findQuotaDecisionV11(env, requestId, ticker);
+  if (!decision || decision.quota_decision === "pending" || decision.quota_decision === "approved_unsettled") {
+    return scannerAccessResponse(requestId, false, 0, "rejected_no_access", cacheStatus, "none", null, "internal_access_unavailable", 503);
+  }
+  return quotaDecisionResponseV11(decision, false);
+}
+
+async function persistRejectedQuotaDecisionV11(
+  env: Env,
+  payload: ScannerAccessCheckRequest,
+  payloadHash: string,
+  subscriptionId: string | null,
+  cacheStatus: "hit" | "miss" | "bypass",
+  reason: string
+): Promise<Response> {
+  await env.DB.prepare(
+    `INSERT OR IGNORE INTO quota_decisions_v11
+     (request_id, ticker, payload_hash, user_id, subscription_id, chat_id, report_type, generation_version,
+      signed_cache_status, cache_created_at, cache_generation_version, force_refresh, language,
+      allowed, charge_credits, quota_decision, effective_cache_status, report_source, remaining_credits, reason)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 'rejected_no_access', ?, 'none', NULL, ?)`
+  ).bind(
+    payload.requestId,
+    payload.ticker,
+    payloadHash,
+    payload.userId,
+    subscriptionId,
+    payload.chatId,
+    payload.reportType,
+    payload.generationVersion,
+    payload.cacheStatus,
+    payload.cacheCreatedAt,
+    payload.cacheGenerationVersion,
+    payload.forceRefresh ? 1 : 0,
+    payload.language,
+    cacheStatus,
+    reason
+  ).run();
+  const decision = await findQuotaDecisionV11(env, payload.requestId, payload.ticker);
+  return decision ? quotaDecisionResponseV11(decision, false) : scannerAccessResponse(payload.requestId, false, 0, "rejected_no_access", cacheStatus, "none", null, "internal_access_unavailable", 503);
+}
+
+async function findQuotaDecisionV11(env: Env, requestId: string, ticker: string): Promise<QuotaDecisionRowV11 | null> {
+  return env.DB.prepare(
+    `SELECT request_id, ticker, payload_hash, report_type, allowed, charge_credits, quota_decision,
+            effective_cache_status, report_source, remaining_credits, cache_receipt_id, reason
+     FROM quota_decisions_v11 WHERE request_id = ? AND ticker = ?`
+  ).bind(requestId, ticker).first<QuotaDecisionRowV11>();
+}
+
+function quotaDecisionResponseV11(row: QuotaDecisionRowV11, repeat: boolean): Response {
+  const ownRepeat = row.report_type === "fundrep" ? "own_repeat_fundrep" : "own_repeat";
+  return scannerAccessResponse(
+    row.request_id,
+    Boolean(row.allowed),
+    repeat && row.allowed ? 0 : creditsToUnits(row.charge_credits) ?? 0,
+    repeat && row.allowed ? ownRepeat : row.quota_decision as QuotaDecisionV11,
+    row.effective_cache_status,
+    repeat && row.allowed ? "own_repeat" : row.report_source,
+    creditsToUnits(row.remaining_credits),
+    row.reason,
+    200,
+    row.cache_receipt_id
+  );
+}
+
+function quotaScenario(reportType: "regular" | "fundrep", cacheStatus: "hit" | "miss" | "bypass"): {
+  decision: QuotaDecisionV11;
+  reportSource: "new_analysis" | "cache";
+} {
+  if (reportType === "fundrep") {
+    if (cacheStatus === "hit") return { decision: "cached_fundrep", reportSource: "cache" };
+    return { decision: cacheStatus === "bypass" ? "refresh_fundrep" : "new_fundrep", reportSource: "new_analysis" };
+  }
+  if (cacheStatus === "hit") return { decision: "cached_regular", reportSource: "cache" };
+  return { decision: cacheStatus === "bypass" ? "refresh_regular" : "new_regular", reportSource: "new_analysis" };
+}
+
+function creditsToUnits(credits: number | null): number | null {
+  return credits === null ? null : credits / 2;
+}
+
+function scannerAccessResponse(
+  requestId: string,
+  allowed: boolean,
+  chargeUnits: number,
+  quotaDecision: QuotaDecisionV11,
+  cacheStatus: "hit" | "miss" | "bypass",
+  reportSource: "new_analysis" | "cache" | "own_repeat" | "none",
+  remainingUnits: number | null,
+  reason: string | null,
+  status = 200,
+  cacheReceiptId: string | null = null
+): Response {
+  return json({ contractVersion: "1.1", requestId, allowed, chargeUnits, quotaDecision, cacheStatus, reportSource, remainingUnits, reason, cacheReceiptId }, status);
+}
+
+export async function commitScannerCache(rawBody: string, env: Env): Promise<Response> {
+  let input: Record<string, unknown>;
+  try {
+    input = JSON.parse(rawBody) as Record<string, unknown>;
+  } catch {
+    return json({ error: "invalid_request" }, 400);
+  }
+  if (input.contractVersion !== "1.1") return json({ error: "invalid_contract_version" }, 400);
+
+  const payload: ScannerCacheCommitRequest = {
+    contractVersion: "1.1",
+    cacheReceiptId: cleanString(input.cacheReceiptId) ?? "",
+    requestId: cleanString(input.requestId) ?? "",
+    ticker: cleanString(input.ticker)?.toUpperCase() ?? "",
+    reportType: input.reportType === "fundrep" ? "fundrep" : "regular",
+    generationVersion: cleanString(input.generationVersion) ?? "",
+    language: cleanInternalLanguage(input.language) as ScannerCacheCommitRequest["language"],
+    resultDigest: cleanString(input.resultDigest)?.toLowerCase() ?? ""
+  };
+  if (!payload.cacheReceiptId || !payload.requestId || !payload.ticker ||
+      (input.reportType !== "regular" && input.reportType !== "fundrep") ||
+      !payload.generationVersion || !["ru", "en", "he"].includes(payload.language) ||
+      !/^[a-f0-9]{64}$/.test(payload.resultDigest)) {
+    return json({ error: "invalid_request" }, 400);
+  }
+
+  const receipt = await env.DB.prepare(
+    `SELECT r.id, r.request_id, r.ticker, r.user_id, r.report_type, r.generation_version, r.language,
+            r.cache_ttl_minutes, r.status, r.result_digest, r.commit_expires_at,
+            e.id AS cache_entry_id, e.expires_at AS cache_entry_expires_at
+     FROM cache_receipts r
+     LEFT JOIN core_cache_entries e ON e.receipt_id = r.id
+     WHERE r.id = ?`
+  ).bind(payload.cacheReceiptId).first<{
+    id: string;
+    request_id: string;
+    ticker: string;
+    user_id: string;
+    report_type: string;
+    generation_version: string;
+    language: string;
+    cache_ttl_minutes: number;
+    status: string;
+    result_digest: string | null;
+    commit_expires_at: string;
+    cache_entry_id: string | null;
+    cache_entry_expires_at: string | null;
+  }>();
+  if (!receipt) return json({ error: "invalid_cache_receipt" }, 400);
+
+  const immutableMatch = receipt.request_id === payload.requestId && receipt.ticker === payload.ticker &&
+    receipt.report_type === payload.reportType && receipt.generation_version === payload.generationVersion &&
+    receipt.language === payload.language;
+  if (!immutableMatch) return json({ error: "cache_receipt_mismatch" }, 400);
+
+  if (receipt.status === "committed") {
+    if (receipt.result_digest !== payload.resultDigest || !receipt.cache_entry_id || !receipt.cache_entry_expires_at) {
+      return json({ error: "cache_receipt_already_used" }, 409);
+    }
+    return json({ contractVersion: "1.1", cacheEntryId: receipt.cache_entry_id, committed: true, expiresAt: receipt.cache_entry_expires_at });
+  }
+  const now = new Date();
+  if (receipt.status !== "pending") return json({ error: "cache_receipt_not_pending" }, 409);
+  if (Date.parse(receipt.commit_expires_at) <= now.getTime()) {
+    await env.DB.prepare("UPDATE cache_receipts SET status = 'expired', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'pending'").bind(receipt.id).run();
+    return json({ error: "cache_receipt_expired" }, 410);
+  }
+
+  const cacheEntryId = crypto.randomUUID();
+  const createdAt = now.toISOString();
+  const expiresAt = new Date(now.getTime() + receipt.cache_ttl_minutes * 60 * 1000).toISOString();
+  await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE cache_receipts
+       SET status = 'committing', result_digest = ?, updated_at = CURRENT_TIMESTAMP
+       WHERE id = ? AND status = 'pending' AND commit_expires_at > ?`
+    ).bind(payload.resultDigest, receipt.id, createdAt),
+    env.DB.prepare(
+      `INSERT OR IGNORE INTO core_cache_entries
+       (id, receipt_id, user_id, ticker, report_type, generation_version, language, result_digest, created_at, expires_at)
+       SELECT ?, id, user_id, ticker, report_type, generation_version, language, result_digest, ?, ?
+       FROM cache_receipts WHERE id = ? AND status = 'committing' AND result_digest = ?`
+    ).bind(cacheEntryId, createdAt, expiresAt, receipt.id, payload.resultDigest),
+    env.DB.prepare(
+      `UPDATE cache_receipts
+       SET status = 'committed', committed_at = ?, updated_at = CURRENT_TIMESTAMP
+       WHERE id = ? AND status = 'committing'
+         AND EXISTS (SELECT 1 FROM core_cache_entries WHERE receipt_id = ?)`
+    ).bind(createdAt, receipt.id, receipt.id)
+  ]);
+
+  const committed = await env.DB.prepare(
+    `SELECT id, expires_at, result_digest FROM core_cache_entries WHERE receipt_id = ?`
+  ).bind(receipt.id).first<{ id: string; expires_at: string; result_digest: string }>();
+  if (!committed) return json({ error: "cache_commit_conflict" }, 409);
+  if (committed.result_digest !== payload.resultDigest) return json({ error: "cache_receipt_already_used" }, 409);
+  return json({ contractVersion: "1.1", cacheEntryId: committed.id, committed: true, expiresAt: committed.expires_at });
 }
 
 async function telegramWebhook(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -989,7 +1980,7 @@ async function updateAdminUser(request: Request, env: Env, ctx: ExecutionContext
 
   await env.DB.prepare(
     `UPDATE users
-     SET email = ?,
+     SET pending_email = CASE WHEN email = ? THEN NULL ELSE ? END,
          display_name = ?,
          language = ?,
          country = ?,
@@ -997,7 +1988,7 @@ async function updateAdminUser(request: Request, env: Env, ctx: ExecutionContext
          status = ?,
          updated_at = CURRENT_TIMESTAMP
      WHERE id = ?`
-  ).bind(email, displayName, language, primary.country, primary.botUrl, status, userId).run();
+  ).bind(email, email, displayName, language, primary.country, primary.botUrl, status, userId).run();
 
   await env.DB.prepare(
     `INSERT INTO user_settings (user_id, language, country)
@@ -1081,7 +2072,7 @@ async function adminChannels(env: Env): Promise<Response> {
 
 async function adminBotRoutes(env: Env): Promise<Response> {
   const result = await env.DB.prepare(
-    `SELECT country, language, bot_url, is_active, created_at, updated_at
+    `SELECT route_id, country, language, bot_url, telegram_chat_id, is_active, created_at, updated_at
      FROM bot_routes
      ORDER BY country ASC`
   ).all();
@@ -1095,20 +2086,28 @@ async function upsertBotRoute(request: Request, env: Env, ctx: ExecutionContext)
   const previousCountry = cleanCountry(body.previousCountry, country);
   const language = cleanLanguage(body.language, env.DEFAULT_LOCALE);
   const botUrl = cleanString(body.botUrl);
+  const routeId = cleanString(body.routeId) ?? country;
+  const telegramChatId = cleanString(body.telegramChatId);
   const isActive = body.isActive === false ? 0 : 1;
   if (!botUrl || !/^https:\/\/t\.me\/[a-zA-Z0-9_]+$/.test(botUrl)) {
     return json({ error: "valid_t_me_bot_url_required" }, 400);
   }
+  if (!/^[a-zA-Z0-9._:-]{2,128}$/.test(routeId)) return json({ error: "valid_route_id_required" }, 400);
+  if (telegramChatId && !/^(?:-?\d{1,20}|@[a-zA-Z][a-zA-Z0-9_]{4,31})$/.test(telegramChatId)) {
+    return json({ error: "valid_telegram_chat_id_required" }, 400);
+  }
 
   await env.DB.prepare(
-    `INSERT INTO bot_routes (country, language, bot_url, is_active, updated_at)
-     VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+    `INSERT INTO bot_routes (route_id, country, language, bot_url, telegram_chat_id, is_active, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
      ON CONFLICT(country) DO UPDATE SET
+       route_id = excluded.route_id,
        language = excluded.language,
        bot_url = excluded.bot_url,
+       telegram_chat_id = excluded.telegram_chat_id,
        is_active = excluded.is_active,
        updated_at = CURRENT_TIMESTAMP`
-  ).bind(country, language, botUrl, isActive).run();
+  ).bind(routeId, country, language, botUrl, telegramChatId, isActive).run();
 
   if (previousCountry !== country) {
     await env.DB.prepare("DELETE FROM bot_routes WHERE country = ?").bind(previousCountry).run();
@@ -1116,7 +2115,7 @@ async function upsertBotRoute(request: Request, env: Env, ctx: ExecutionContext)
 
   ctx.waitUntil(audit(env, null, "admin", "bot_route.upserted", request, { country, previousCountry, language, botUrl, isActive }));
 
-  return json({ country, language, botUrl, isActive: Boolean(isActive) });
+  return json({ routeId, country, language, botUrl, telegramChatId, isActive: Boolean(isActive) });
 }
 
 async function deleteBotRoute(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -1137,7 +2136,7 @@ async function findUser(env: Env, input: { telegramUserId?: string | null; email
     if (user) return user;
   }
   if (input.email) {
-    const user = await env.DB.prepare("SELECT * FROM users WHERE email = ?").bind(input.email).first<AppUser>();
+    const user = await env.DB.prepare("SELECT * FROM users WHERE email = ? AND email_verified_at IS NOT NULL").bind(input.email).first<AppUser>();
     if (user) return user;
   }
   return null;
@@ -1145,6 +2144,103 @@ async function findUser(env: Env, input: { telegramUserId?: string | null; email
 
 async function findUserById(env: Env, userId: string): Promise<AppUser | null> {
   return env.DB.prepare("SELECT * FROM users WHERE id = ?").bind(userId).first<AppUser>();
+}
+
+async function createUserSession(env: Env, userId: string): Promise<{ cookie: string; csrfToken: string }> {
+  const sessionId = crypto.randomUUID();
+  const token = randomSecret(32);
+  const csrfToken = randomSecret(32);
+  const expiresAt = new Date(Date.now() + SESSION_TTL_SECONDS * 1000).toISOString();
+
+  await env.DB.prepare(
+    `INSERT INTO user_sessions (id, user_id, token_hash, csrf_hash, expires_at)
+     VALUES (?, ?, ?, ?, ?)`
+  ).bind(sessionId, userId, await sha256(token), await sha256(csrfToken), expiresAt).run();
+
+  return {
+    csrfToken,
+    cookie: `${SESSION_COOKIE_NAME}=${sessionId}.${token}; Max-Age=${SESSION_TTL_SECONDS}; Path=/; HttpOnly; Secure; SameSite=Lax`
+  };
+}
+
+async function requireSession(request: Request, env: Env): Promise<AuthenticatedSession | Response> {
+  const token = cookieValue(request, SESSION_COOKIE_NAME);
+  if (!token) return json({ error: "authenticated_session_required" }, 401);
+
+  const [sessionId, rawToken] = token.split(".");
+  if (!sessionId || !rawToken) return json({ error: "invalid_session" }, 401);
+
+  const row = await env.DB.prepare(
+    `SELECT s.id, s.user_id, s.token_hash, s.csrf_hash, s.expires_at, u.*
+     FROM user_sessions s
+     JOIN users u ON u.id = s.user_id
+     WHERE s.id = ? AND s.revoked_at IS NULL`
+  ).bind(sessionId).first<Record<string, string | null>>();
+
+  if (!row?.user_id || !row.token_hash || !row.csrf_hash || !row.expires_at) return json({ error: "invalid_session" }, 401);
+  if (Date.parse(row.expires_at) <= Date.now()) return json({ error: "session_expired" }, 401);
+  if (!(await timingSafeEqual(await sha256(rawToken), row.token_hash))) return json({ error: "invalid_session" }, 401);
+  if (!row.telegram_user_id && !row.email_verified_at) {
+    await env.DB.prepare("UPDATE user_sessions SET revoked_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(sessionId).run();
+    return json({ error: "email_verification_required" }, 401);
+  }
+
+  await env.DB.prepare("UPDATE user_sessions SET last_seen_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(sessionId).run();
+
+  return {
+    sessionId,
+    csrfTokenHash: row.csrf_hash,
+    user: {
+      id: row.user_id,
+      telegram_user_id: row.telegram_user_id ?? null,
+      email: row.email ?? null,
+      email_verified_at: row.email_verified_at ?? null,
+      pending_email: row.pending_email ?? null,
+      display_name: row.display_name ?? null,
+      language: row.language ?? "en",
+      country: row.country ?? "IL",
+      selected_bot_url: row.selected_bot_url ?? null,
+      status: row.status ?? "active",
+      created_at: row.created_at ?? "",
+      updated_at: row.updated_at ?? "",
+      last_seen_at: row.last_seen_at ?? null
+    }
+  };
+}
+
+async function requireCsrf(request: Request, auth: AuthenticatedSession): Promise<Response | null> {
+  if (request.method === "GET" || request.method === "HEAD" || request.method === "OPTIONS") return null;
+  const token = request.headers.get("X-CSRF-Token") ?? "";
+  if (!token || !(await timingSafeEqual(await sha256(token), auth.csrfTokenHash))) {
+    return json({ error: "csrf_token_required" }, 403);
+  }
+  return null;
+}
+
+function cookieValue(request: Request, name: string): string | null {
+  const cookie = request.headers.get("Cookie") ?? "";
+  const prefix = `${name}=`;
+  for (const part of cookie.split(";")) {
+    const trimmed = part.trim();
+    if (trimmed.startsWith(prefix)) return trimmed.slice(prefix.length);
+  }
+  return null;
+}
+
+async function persistLegalAcceptances(env: Env, userId: string, body: Record<string, unknown>): Promise<void> {
+  const accepted = body.acceptances;
+  if (!Array.isArray(accepted)) return;
+  for (const item of accepted.slice(0, 20)) {
+    if (typeof item !== "object" || item === null) continue;
+    const record = item as Record<string, unknown>;
+    const documentType = cleanEnum(record.documentType, ["terms", "risk_disclaimer", "subscription_terms", "api_terms", "api_commercial_use"], "terms");
+    const documentVersion = cleanString(record.documentVersion) ?? "v0.1";
+    await env.DB.prepare(
+      `INSERT INTO legal_acceptances (id, user_id, document_type, document_version, metadata_json)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(user_id, document_type, document_version) DO UPDATE SET accepted_at = CURRENT_TIMESTAMP, metadata_json = excluded.metadata_json`
+    ).bind(crypto.randomUUID(), userId, documentType, documentVersion, JSON.stringify(record.metadata ?? {})).run();
+  }
 }
 
 async function resolveUserFromUrl(url: URL, env: Env): Promise<AppUser | null> {
@@ -1219,6 +2315,84 @@ async function recordApiUsage(env: Env, input: { userId: string | null; apiKeyId
      VALUES (?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP)
      ON CONFLICT(id) DO UPDATE SET count = count + 1, updated_at = CURRENT_TIMESTAMP`
   ).bind(id, day, input.userId, input.apiKeyId ?? null, input.endpoint).run();
+}
+
+export async function requireApiKey(request: Request, env: Env, requiredScope: typeof API_KEY_SCOPES[number]): Promise<ApiKeyIdentity | Response> {
+  if (!env.API_KEY_HASH_SECRET) return json({ error: "api_key_hash_secret_not_configured" }, 503);
+  const token = bearerToken(request);
+  if (!token || !token.startsWith("msk_live_") || token.length < 40) return json({ error: "invalid_api_key" }, 401);
+
+  const prefix = token.slice(0, 18);
+  const candidates = await env.DB.prepare(
+    `SELECT id, user_id, key_hash, scopes_json, expires_at, is_active, hash_version
+     FROM api_keys WHERE key_prefix = ?`
+  ).bind(prefix).all<{
+    id: string;
+    user_id: string;
+    key_hash: string;
+    scopes_json: string;
+    expires_at: string | null;
+    is_active: number;
+    hash_version: string;
+  }>();
+  if (!candidates.results.length) return json({ error: "invalid_api_key" }, 401);
+
+  const keyedHash = await hmacHex(env.API_KEY_HASH_SECRET, token);
+  let key: typeof candidates.results[number] | undefined;
+  for (const candidate of candidates.results) {
+    if (candidate.hash_version === "hmac_sha256_v1" && await timingSafeEqual(candidate.key_hash, keyedHash)) {
+      key = candidate;
+      break;
+    }
+  }
+  if (!key) {
+    const legacyHash = await sha256(token);
+    if (candidates.results.some((candidate) => candidate.hash_version === "sha256_legacy" && candidate.key_hash === legacyHash)) {
+      return json({ error: "api_key_rotation_required" }, 401);
+    }
+    return json({ error: "invalid_api_key" }, 401);
+  }
+
+  if (!key.is_active) return json({ error: "api_key_revoked" }, 401);
+  if (key.expires_at && Date.parse(key.expires_at) <= Date.now()) return json({ error: "api_key_expired" }, 401);
+  const scopes = parseJsonSafe<string[]>(key.scopes_json, []);
+  if (!scopes.includes(requiredScope)) return json({ error: "api_key_scope_required", requiredScope }, 403);
+
+  const user = await findUserById(env, key.user_id);
+  if (!user || user.status !== "active") return json({ error: "user_not_active" }, 403);
+  if (!isSubscriptionCurrentlyAllowed(await latestSubscription(env, key.user_id))) {
+    return json({ error: "active_subscription_required" }, 403);
+  }
+  return { id: key.id, userId: key.user_id, scopes };
+}
+
+async function enforceApiAnalysisLimits(request: Request, env: Env, identity: ApiKeyIdentity): Promise<Response | null> {
+  const ip = request.headers.get("CF-Connecting-IP") ?? request.headers.get("X-Forwarded-For") ?? "unknown";
+  const checks = [
+    ["api_key", identity.id, 60],
+    ["api_user", identity.userId, 120],
+    ["api_ip", await sha256(ip), 120]
+  ] as const;
+  for (const [bucket, subject, limit] of checks) {
+    if (!(await consumeRateLimit(env, bucket, subject, limit, 60))) {
+      return json({ error: "rate_limited", bucket, retryAfter: 60 }, 429);
+    }
+  }
+  return null;
+}
+
+async function consumeRateLimit(env: Env, bucket: string, subject: string, limit: number, windowSeconds: number): Promise<boolean> {
+  const now = Math.floor(Date.now() / 1000);
+  const windowStart = now - (now % windowSeconds);
+  const expiresAt = windowStart + windowSeconds;
+  const key = await sha256(`${bucket}:${subject}:${windowStart}`);
+  const row = await env.DB.prepare(
+    `INSERT INTO rate_limits (key, bucket, count, window_start, expires_at, updated_at)
+     VALUES (?, ?, 1, ?, ?, CURRENT_TIMESTAMP)
+     ON CONFLICT(key) DO UPDATE SET count = count + 1, updated_at = CURRENT_TIMESTAMP
+     RETURNING count`
+  ).bind(key, bucket, windowStart, expiresAt).first<{ count: number }>();
+  return Boolean(row && row.count <= limit);
 }
 
 async function findBotUrl(env: Env, country: string): Promise<string | null> {
@@ -1329,11 +2503,16 @@ async function requireAdmin(request: Request, env: Env): Promise<Response | null
   return null;
 }
 
-async function requireInternalAccess(request: Request, env: Env): Promise<Response | null> {
-  if (!env.INTERNAL_API_SECRET) return json({ error: "internal_api_secret_not_configured" }, 503);
-  const token = bearerToken(request);
-  if (token && await timingSafeEqual(token, env.INTERNAL_API_SECRET)) return null;
-
+async function requireInternalAccess(request: Request, env: Env, rawBody: string, requiredScope: InternalScope): Promise<Response | null> {
+  const keyId = cleanString(request.headers.get("X-Key-Id") ?? request.headers.get("X-Market-Signal-Key-Id"));
+  const requestId = cleanString(request.headers.get("X-Request-Id"));
+  if (!keyId || !requestId || keyId.length > 64 || requestId.length > 128) {
+    return json({ error: "internal_key_and_request_id_required" }, 401);
+  }
+  const secret = internalSecretForKey(env, keyId);
+  if (!secret) {
+    return hasAnyInternalSigningSecret(env) ? json({ error: "unauthorized" }, 401) : json({ error: "internal_signing_keys_not_configured" }, 503);
+  }
   const timestamp = request.headers.get("X-Timestamp") ?? request.headers.get("X-Market-Signal-Timestamp");
   const signature = request.headers.get("X-Signature") ?? request.headers.get("X-Market-Signal-Signature");
   if (!timestamp || !signature) return json({ error: "internal_signature_required" }, 401);
@@ -1345,11 +2524,57 @@ async function requireInternalAccess(request: Request, env: Env): Promise<Respon
 
   const url = new URL(request.url);
   const canonicalQuery = canonicalSearchParams(url.searchParams);
-  const expected = await hmacHex(env.INTERNAL_API_SECRET, `${timestamp}.${request.method}.${url.pathname}.${canonicalQuery}`);
+  const bodyHash = await sha256(rawBody);
+  const canonical = `${timestamp}.${keyId}.${requestId}.${request.method}.${url.pathname}.${canonicalQuery}.${bodyHash}`;
+  const expected = await hmacHex(secret, canonical);
   const normalizedSignature = signature.startsWith("sha256=") ? signature.slice("sha256=".length) : signature;
   if (!(await timingSafeEqual(normalizedSignature, expected))) return json({ error: "unauthorized" }, 401);
 
+  if (!env.INTERNAL_API_SCOPES_JSON) return json({ error: "internal_scope_map_not_configured" }, 503);
+  const scopes = internalScopesForKey(env, keyId);
+  if (!scopes.includes(requiredScope)) {
+    return json({ error: "internal_scope_required", requiredScope }, 403);
+  }
+
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  await env.DB.prepare("DELETE FROM internal_request_nonces WHERE expires_at < ?").bind(nowSeconds).run();
+  const expiresAt = nowSeconds + 10 * 60;
+  const insert = await env.DB.prepare(
+    `INSERT OR IGNORE INTO internal_request_nonces (key_id, request_id, signature_hash, request_timestamp, expires_at)
+     VALUES (?, ?, ?, ?, ?)`
+  ).bind(keyId, requestId, await sha256(normalizedSignature), Number(timestamp), expiresAt).run();
+  if ((insert.meta?.changes ?? 0) !== 1) return json({ error: "internal_request_replayed" }, 409);
+
   return null;
+}
+
+function internalScopesForKey(env: Env, keyId: string): InternalScope[] {
+  const scopeMap = parseJsonSafe<Record<string, unknown>>(env.INTERNAL_API_SCOPES_JSON ?? "{}", {});
+  const configured = scopeMap[keyId];
+  if (!Array.isArray(configured)) return [];
+  const allowed: InternalScope[] = ["matcher:access", "matcher:deliver", "scanner:access", "scanner:cache", "scanner:history", "website:subscriptions"];
+  return configured.filter((scope): scope is InternalScope => typeof scope === "string" && allowed.includes(scope as InternalScope));
+}
+
+function internalSecretForKey(env: Env, keyId: string): string | null {
+  if (env.INTERNAL_API_SECRETS_JSON) {
+    const secrets = parseJsonSafe<Record<string, unknown>>(env.INTERNAL_API_SECRETS_JSON, {});
+    const configured = secrets[keyId];
+    if (typeof configured === "string" && configured.length >= 32) return configured;
+  }
+  const splitSecretName = `INTERNAL_API_SECRET_${keyId.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}`;
+  const splitSecret = (env as unknown as Record<string, unknown>)[splitSecretName];
+  if (typeof splitSecret === "string" && splitSecret.length >= 32) return splitSecret;
+  if (env.INTERNAL_API_SECRET && env.INTERNAL_API_SECRET.length >= 32 && env.INTERNAL_API_KEY_ID === keyId) return env.INTERNAL_API_SECRET;
+  return null;
+}
+
+function hasAnyInternalSigningSecret(env: Env): boolean {
+  if (env.INTERNAL_API_SECRETS_JSON) return true;
+  if (env.INTERNAL_API_SECRET && env.INTERNAL_API_KEY_ID) return true;
+  return Object.entries(env as unknown as Record<string, unknown>).some(([key, value]) =>
+    key.startsWith("INTERNAL_API_SECRET_") && typeof value === "string" && value.length >= 32
+  );
 }
 
 async function requireWebhookSecret(request: Request, env: Env): Promise<Response | null> {
@@ -1418,6 +2643,38 @@ async function sendTelegramMessage(env: Env, chatId: string | number, text: stri
   return telegramApi(env, "sendMessage", { chat_id: chatId, text, ...extra });
 }
 
+class TelegramDeliveryError extends Error {
+  constructor(public readonly code: string, public readonly retrySafe: boolean) {
+    super(code);
+  }
+}
+
+async function sendDeliveryTelegramMessage(env: Env, chatId: string, text: string): Promise<string> {
+  if (!env.TELEGRAM_BOT_TOKEN) throw new TelegramDeliveryError("telegram_bot_token_not_configured", true);
+  let response: Response;
+  try {
+    response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, text })
+    });
+  } catch {
+    throw new TelegramDeliveryError("telegram_delivery_indeterminate", false);
+  }
+  let data: unknown;
+  try {
+    data = await response.json();
+  } catch {
+    throw new TelegramDeliveryError("telegram_delivery_indeterminate", false);
+  }
+  if (!response.ok || !isTelegramOk(data)) throw new TelegramDeliveryError("telegram_delivery_rejected", true);
+  const messageId = isRecord(data.result) ? data.result.message_id : null;
+  if (typeof messageId !== "number" && typeof messageId !== "string") {
+    throw new TelegramDeliveryError("telegram_delivery_indeterminate", false);
+  }
+  return String(messageId);
+}
+
 async function telegramApi(env: Env, method: string, payload: Record<string, unknown>): Promise<unknown> {
   if (!env.TELEGRAM_BOT_TOKEN) throw new Error("Telegram bot token is not configured");
 
@@ -1437,6 +2694,17 @@ function isTelegramOk(value: unknown): value is { ok: true; result?: unknown } {
   return typeof value === "object" && value !== null && (value as { ok?: unknown }).ok === true;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isExactRecord(value: unknown, keys: string[]): value is Record<string, unknown> {
+  if (!isRecord(value)) return false;
+  const actual = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+}
+
 function bearerToken(request: Request): string | null {
   const header = request.headers.get("Authorization");
   if (!header?.startsWith("Bearer ")) return null;
@@ -1454,7 +2722,6 @@ async function timingSafeEqual(a: string, b: string): Promise<boolean> {
   const encoder = new TextEncoder();
   const left = encoder.encode(a);
   const right = encoder.encode(b);
-  if (left.byteLength !== right.byteLength) return false;
   const key = await crypto.subtle.importKey("raw", encoder.encode("market-signal-admin-compare"), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
   const [leftMac, rightMac] = await Promise.all([
     crypto.subtle.sign("HMAC", key, left),
@@ -1538,6 +2805,15 @@ function cleanString(value: unknown): string | null {
   return cleaned.length > 0 && cleaned.length <= 512 ? cleaned : null;
 }
 
+export function parseFutureIsoTimestamp(value: unknown): { ok: true; value: string | null } | { ok: false } {
+  if (value === undefined || value === null || value === "") return { ok: true, value: null };
+  const raw = cleanString(value);
+  if (!raw || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(raw)) return { ok: false };
+  const timestamp = Date.parse(raw);
+  if (!Number.isFinite(timestamp) || timestamp <= Date.now()) return { ok: false };
+  return { ok: true, value: new Date(timestamp).toISOString() };
+}
+
 function cleanCountry(value: unknown, fallback: string): string {
   const cleaned = cleanString(value)?.toUpperCase();
   if (!cleaned || !/^[A-Z]{2}$/.test(cleaned)) return fallback.toUpperCase();
@@ -1584,11 +2860,16 @@ function isString(value: string | null | undefined): value is string {
 }
 
 function json(data: unknown, status = 200): Response {
+  return jsonWithHeaders(data, {}, status);
+}
+
+function jsonWithHeaders(data: unknown, extraHeaders: Record<string, string>, status = 200): Response {
   return new Response(JSON.stringify(data), {
     status,
     headers: {
       "Content-Type": "application/json; charset=utf-8",
-      "Cache-Control": "no-store"
+      "Cache-Control": "no-store",
+      ...extraHeaders
     }
   });
 }
@@ -1599,7 +2880,7 @@ function withCors(request: Request, response: Response, env: Env): Response {
   if (origin) headers.set("Access-Control-Allow-Origin", origin);
   headers.set("Vary", "Origin");
   headers.set("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS");
-  headers.set("Access-Control-Allow-Headers", "Content-Type,Authorization,X-Admin-User,X-Webhook-Secret,X-Timestamp,X-Signature,X-Market-Signal-Timestamp,X-Market-Signal-Signature");
+  headers.set("Access-Control-Allow-Headers", "Content-Type,Authorization,X-CSRF-Token,X-Admin-User,X-Webhook-Secret,X-Timestamp,X-Signature,X-Market-Signal-Timestamp,X-Market-Signal-Signature");
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
@@ -1987,9 +3268,11 @@ function renderAdminApp(env: Env): string {
           <section class="panel">
             <h2>Bot routes</h2>
             <form id="routeForm" class="route-row">
+              <input name="routeId" placeholder="israel-he">
               <input name="country" placeholder="IL">
               <input name="language" placeholder="he">
               <input name="botUrl" placeholder="https://t.me/your_israel_bot">
+              <input name="telegramChatId" placeholder="@channel or -100...">
               <label class="inline-check"><input name="isActive" type="checkbox" checked> Active</label>
               <button type="submit">Save</button>
             </form>
@@ -2224,6 +3507,7 @@ const countries = document.querySelector("#countries");
 const telegramUser = tg?.initDataUnsafe?.user;
 let appConfig = null;
 let currentUserId = localStorage.getItem("marketSignalUserId") || "";
+let csrfToken = localStorage.getItem("marketSignalCsrfToken") || "";
 
 async function boot() {
   const config = await fetch("/api/config").then((response) => response.json());
@@ -2267,11 +3551,19 @@ form.addEventListener("submit", async (event) => {
   const payload = await response.json();
   result.hidden = false;
   if (!response.ok) {
-    result.textContent = payload.error === "valid_email_required" ? "Please enter a valid email address." : "Could not create account. Please check your details.";
+    if (payload.error === "valid_email_required") {
+      result.textContent = "Please enter a valid email address.";
+    } else if (payload.error === "email_verification_required") {
+      result.textContent = "Email confirmation is required. For now, open this form from the verified Telegram Web App.";
+    } else {
+      result.textContent = "Could not create account. Please check your details.";
+    }
     return;
   }
   currentUserId = payload.userId;
+  csrfToken = payload.csrfToken || "";
   localStorage.setItem("marketSignalUserId", currentUserId);
+  localStorage.setItem("marketSignalCsrfToken", csrfToken);
   result.innerHTML = renderCountryLinks(payload.countryLinks);
   renderAccount(payload.countryLinks);
 });
@@ -2281,8 +3573,8 @@ account.addEventListener("click", async (event) => {
   if (!button || !currentUserId) return;
   const response = await fetch("/api/account/countries", {
     method: "DELETE",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ userId: currentUserId, country: button.dataset.country })
+    headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
+    body: JSON.stringify({ country: button.dataset.country })
   });
   const payload = await response.json();
   if (!response.ok) {
@@ -2296,7 +3588,7 @@ account.addEventListener("click", async (event) => {
 });
 
 async function loadAccount(userId) {
-  const response = await fetch("/api/account?userId=" + encodeURIComponent(userId));
+  const response = await fetch("/api/account");
   if (!response.ok) return;
   const payload = await response.json();
   renderAccount(payload.countryLinks);
@@ -2461,8 +3753,10 @@ routes.addEventListener("click", async (event) => {
     const data = {
       country: row.querySelector('[name="country"]').value,
       previousCountry: button.dataset.country,
+      routeId: row.querySelector('[name="routeId"]').value,
       language: row.querySelector('[name="language"]').value,
       botUrl: row.querySelector('[name="botUrl"]').value,
+      telegramChatId: row.querySelector('[name="telegramChatId"]').value,
       isActive: row.querySelector('[name="isActive"]').checked
     };
     setStatus("Saving bot route...", "loading");
@@ -2629,11 +3923,13 @@ function renderOption(value, label, selectedValue) {
 }
 
 function renderRoutes(rows) {
-  return '<table class="editable-table"><thead><tr><th>Country</th><th>Language</th><th>Bot URL</th><th>Active</th><th>Updated</th><th></th><th></th></tr></thead><tbody>' +
+  return '<table class="editable-table"><thead><tr><th>Route ID</th><th>Country</th><th>Language</th><th>Bot URL</th><th>Telegram target</th><th>Active</th><th>Updated</th><th></th><th></th></tr></thead><tbody>' +
     rows.map((row) => '<tr>' +
+      '<td><input name="routeId" value="' + escapeText(row.route_id || row.country) + '"></td>' +
       '<td><input name="country" value="' + escapeText(row.country) + '"></td>' +
       '<td><select name="language">' + renderOption("en", "English", row.language) + renderOption("ru", "Russian", row.language) + renderOption("he", "Hebrew", row.language) + '</select></td>' +
       '<td><input name="botUrl" value="' + escapeText(row.bot_url) + '"></td>' +
+      '<td><input name="telegramChatId" value="' + escapeText(row.telegram_chat_id || "") + '"></td>' +
       '<td><label class="inline-check"><input name="isActive" type="checkbox"' + (row.is_active ? " checked" : "") + '> Active</label></td>' +
       '<td>' + escapeText(row.updated_at) + '</td>' +
       '<td><button type="button" data-route-action="save" data-country="' + escapeText(row.country) + '">Save</button></td>' +
