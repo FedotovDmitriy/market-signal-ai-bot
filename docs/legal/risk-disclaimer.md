@@ -1,7 +1,7 @@
 # Risk Disclaimer For Ticker Analysis
 
 Status: working product draft, not final legal advice.
-Last updated: 2026-06-18.
+Last updated: 2026-07-09.
 
 Market Signal AI provides market data, ticker analysis, news matching, automated summaries, risk notes, and analytical reports for informational and research purposes only.
 
@@ -12,6 +12,10 @@ Any signal, label, score, confidence value, summary, chart interpretation, scena
 Financial markets involve risk. Prices can move quickly and unpredictably. You may lose some or all of your invested capital. Past performance, historical data, backtests, technical patterns, analyst commentary, news sentiment, and model outputs do not guarantee future results.
 
 Market Signal AI may use third-party market data, Telegram news sources, public information, automated extraction, algorithmic analysis, and AI-generated text. These sources and systems may be delayed, incomplete, inaccurate, unavailable, mistranslated, incorrectly matched to a ticker, or affected by technical errors.
+
+Telegram country and language channels are read-only broadcast feeds. Channel posts are general informational market content and may be visible to other channel subscribers. Users must not treat broadcast channel messages as private advice or as a personal ticker request flow.
+
+Private ticker analysis requests may be available through a private Telegram bot chat, website account, or API depending on subscription plan and quota. "Private" describes the delivery flow and recipient, not the legal nature of the analysis. Private ticker analysis is still informational only and is not personalized investment advice, financial advice, or a recommendation based on the user's personal circumstances.
 
 You are solely responsible for your own investment decisions. Before making any trading or investment decision, you should conduct your own research and consult a licensed professional who can consider your personal financial situation, risk tolerance, objectives, jurisdiction, and tax position.
 
@@ -44,6 +48,14 @@ Required short version for Telegram:
 
 > Informational market analysis only. Not investment advice. Not a buy/sell recommendation. Trading involves risk, including possible loss of capital.
 
+Required short version for read-only channels:
+
+> Read-only broadcast feed. Informational market content only. Not investment advice. Do not send private ticker requests here.
+
+Required short version for private bot analysis:
+
+> Private delivery, informational analysis only. Not personalized investment advice. Not a buy/sell recommendation.
+
 Required short version for reports:
 
 > This report is for informational purposes only and is not personalized investment advice. Market data and AI analysis may be inaccurate or delayed. You are solely responsible for any trading or investment decision.
@@ -55,4 +67,3 @@ Local legal review required before launch:
 - United Kingdom: financial promotion and FCA perimeter review.
 - Israel: investment advice and portfolio management perimeter review if Israeli securities/users are targeted.
 - Georgia and other launch markets: local consumer, privacy, tax, and financial regulatory review.
-

@@ -311,10 +311,13 @@ type ScannerAccessCheckResponse = {
   remainingUnits: number | null;
   reason: string | null;
   cacheReceiptId: string | null;
+  cacheEntryId: string | null;
 };
 ```
 
-For an allowed `new_*` or `refresh_*` decision, Core creates and returns a one-time `cacheReceiptId`. The receipt must be committed within 15 minutes of issuance. Replaying the same `requestId + ticker` returns the same receipt without another charge. Cached and rejected decisions return `null`.
+For an allowed `new_*` or `refresh_*` decision, Core creates and returns a one-time `cacheReceiptId`. The receipt must be committed within 15 minutes of issuance. Replaying the same `requestId + ticker` returns the stored response without another charge or another receipt. Cached, own-repeat, and rejected decisions return `cacheReceiptId: null`.
+
+Core owns cache pricing and ownership. If the same user requests the same fresh committed cache entry with a new `requestId`, Core returns `own_repeat`/`own_repeat_fundrep`, `reportSource: "own_repeat"`, `chargeUnits: 0`, and the linked `cacheEntryId`. If another user requests the same fresh committed cache entry, Core returns `cached_regular`/`cached_fundrep`, charges the cached price, and returns the linked `cacheEntryId`.
 
 ### Quota Cost And TTL
 

@@ -143,15 +143,20 @@ In BotFather, also set the bot domain to the deployed Worker host if Telegram as
 - `/api/register` create or update a user only through a verified identity provider. Email-only registration remains closed until confirmation email delivery is configured.
 - `/api/auth/email/request` send a 15-minute passwordless email verification link.
 - `/api/auth/email/verify` consume the one-time link, create/login the verified account, and provision the free `beta` plan when no active plan exists.
+- `/api/session/bootstrap` exchange signed Telegram init data for a Core `ms_session` cookie and CSRF token.
+- `/api/session/csrf` refresh a CSRF token using a valid Core `ms_session` cookie after page reload.
 - `/api/settings` update user settings.
 - `/api/account` get account details and linked country chats.
 - `/api/account/countries` remove a linked country chat.
 - `/api/me` get the SaaS user dashboard payload: profile, linked chats, current subscription, API keys, and recent analysis history.
 - `/api/me/profile` update profile, language, and selected countries.
 - `/api/me/subscription` list user subscription records and current access state.
+- `/api/me/subscription/checkout` create a user-session checkout URL when `SUBSCRIPTION_CHECKOUT_URL` is configured.
+- `/api/me/subscription/portal` create a user-session billing portal URL when `SUBSCRIPTION_PORTAL_URL` is configured.
 - `/api/me/api-keys` list, create, or revoke user API keys. New raw tokens are returned only once on creation.
 - `/api/me/api-keys/rotate` atomically revoke one key and return its replacement token once.
 - `/api/me/analysis-history` list user analysis request history.
+- `/api/me/analysis-requests` submit a premium private analysis request from an authenticated website session.
 - `/api/analysis/requests` submit an analysis request using a scoped user API key.
 - `/api/subscriptions` receive external subscription event.
 - `/api/internal/subscriptions` receive website subscription events through HMAC scope `website:subscriptions`.
@@ -211,8 +216,10 @@ The response includes `botUrl` only when the subscription status is `trialing` o
 - `/api/health` checks D1 plus account, subscription, session, legal acceptance, API usage, and quota tables.
 - Rate limiting is applied to registration, settings, user account APIs, subscription intake, and admin API routes.
 - Private account APIs use the `ms_session` HttpOnly cookie. Cookie-authenticated write requests require `X-CSRF-Token`.
+- Website session bootstrap trusts signed Telegram init data or an existing Core session only. Browser-supplied `email` or `userId` never establishes account ownership. Website Worker/browser flows use `/api/session/bootstrap`, `/api/session/csrf`, and `/api/me/*`; HMAC remains reserved for backend-only `/api/internal/*` routes.
 - Email ownership is never inferred from address equality. Email signup/login uses a one-time HMAC-hashed link that expires after 15 minutes; only successful consumption sets `email_verified_at` and issues a session. A verified user without an active plan receives the free `beta` plan with 25 analysis units (50 half-credits).
 - User API analysis requires a Bearer API key with `analysis:write`, an active key/user/subscription, and available key/user/IP rate limits and analysis quota. `API_KEY_HASH_SECRET` is required for keyed token hashes. Keys created before migration `0011_api_auth_and_internal_replay.sql` return `api_key_rotation_required` and must be replaced.
+- Telegram channel delivery and private ticker analysis are separate access paths. Country/language channels are broadcast-only destinations. Private Telegram ticker requests are accepted only from a user's private chat, require an active premium plan (`pro`/`premium`) and available quota, and are recorded as private analysis requests. Broadcast channels and groups cannot be used as arbitrary user ticker request destinations.
 - Internal service access is HMAC-only. Every request requires `X-Key-Id`, unique `X-Request-Id`, `X-Timestamp`, and `X-Signature`; replayed request IDs are rejected.
 
 Internal signing canonical value:

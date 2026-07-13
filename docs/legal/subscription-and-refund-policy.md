@@ -1,7 +1,7 @@
 # Subscription Terms And Refund Policy
 
 Status: working product draft, not final legal advice.
-Last updated: 2026-06-18.
+Last updated: 2026-07-10.
 
 These Subscription Terms and Refund Policy apply to paid access to Market Signal AI.
 
@@ -59,11 +59,15 @@ Cancellation should be at least as easy to find and complete as signup. After ca
 - API keys and Telegram access may be disabled or downgraded at period end;
 - historical reports may become unavailable or read-only depending on plan rules.
 
+If the selected payment provider or Merchant of Record provides a hosted customer portal, the account interface may link to that portal for cancellation, renewal, payment method updates, invoices, and receipts.
+
 ## 5. Failed Payments
 
 If a payment fails, Market Signal AI may retry payment, notify the user, provide a grace period, downgrade access, suspend paid features, or terminate the subscription.
 
 The grace period and retry rules should be defined before launch.
+
+User-facing subscription status should distinguish at least: `trialing`, `active`, `past_due` or `payment_failed`, `canceled`, `expired`, `refunded`, and `chargeback/dispute` where supported by the provider.
 
 ## 6. Plan Changes
 
@@ -107,6 +111,16 @@ Prices may exclude taxes unless stated otherwise. Users are responsible for taxe
 
 Invoice and receipt requirements must be configured according to the payment provider and operating jurisdiction.
 
+## 12. Website Subscription Management
+
+The website may show subscription details from the user's authenticated account session, including plan, status, renewal date, cancellation state, channel access, API availability, private-analysis entitlement, and quota summary.
+
+Browser code must not call internal HMAC routes and must not receive payment webhook secrets, provider secrets, raw HMAC secrets, or internal service tokens.
+
+Checkout, manage-billing, renewal, cancellation, invoices, receipts, refunds, and payment-method updates should use approved Core/provider URLs only.
+
+The website must not imply that a paid subscription includes investment advice, personalized recommendations, guaranteed profit, auto-trading, copy trading, broker execution, or portfolio management.
+
 Local legal review required before launch:
 
 - automatic renewal and cancellation requirements in the United States and target US states;
@@ -114,4 +128,3 @@ Local legal review required before launch:
 - Israeli consumer protection and cancellation rules if targeting Israel;
 - tax/VAT/sales tax registration and invoice requirements;
 - Stripe, Telegram Payments, or chosen provider flow review.
-

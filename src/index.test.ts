@@ -72,6 +72,25 @@ async function testSha256(value: string): Promise<string> {
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
+async function signedTelegramInitData(botToken: string, user: Record<string, unknown>): Promise<string> {
+  const params = new URLSearchParams({
+    auth_date: Math.floor(Date.now() / 1000).toString(),
+    query_id: "q1",
+    user: JSON.stringify(user)
+  });
+  const dataCheckString = [...params.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => `${key}=${value}`)
+    .join("\n");
+  const secretKey = await crypto.subtle.sign(
+    "HMAC",
+    await crypto.subtle.importKey("raw", new TextEncoder().encode("WebAppData"), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]),
+    new TextEncoder().encode(botToken)
+  );
+  params.set("hash", await testHmacHex(secretKey, dataCheckString));
+  return params.toString();
+}
+
 function testExecutionContext(): ExecutionContext {
   return {
     waitUntil() {},
@@ -87,6 +106,16 @@ function createQuotaEnv(options: {
   plan?: string;
   policyExists?: boolean;
   cacheEntryExpiresAt?: string;
+  users?: Record<string, { status?: string; subscriptionId?: string; plan?: string }>;
+  cacheEntries?: Array<{
+    id: string;
+    userId: string;
+    ticker?: string;
+    reportType?: "regular" | "fundrep";
+    generationVersion?: string;
+    language?: "ru" | "en" | "he";
+    expiresAt: string;
+  }>;
 } = {}): { env: Env; state: { usedCredits: number; batchCalls: number; decisions: Map<string, Record<string, unknown>> } } {
   const state = {
     usedCredits: options.usedCredits ?? 0,
@@ -106,14 +135,39 @@ function createQuotaEnv(options: {
         },
         async first<T>() {
           if (query.includes("FROM quota_decisions_v11")) return state.decisions.get(`${statement.args[0]}:${statement.args[1]}`) as T;
-          if (query.includes("FROM core_cache_entries") && query.includes("WHERE user_id")) {
-            const expiresAt = options.cacheEntryExpiresAt;
-            return (expiresAt && Date.parse(expiresAt) >= Date.parse(String(statement.args[5]))) ? { id: "cache_entry_1" } as T : null as T;
+          if (query.includes("FROM core_cache_entries")) {
+            const fallbackEntry = options.cacheEntryExpiresAt ? [{
+              id: "cache_entry_1",
+              userId: "user_1",
+              ticker: "NVDA",
+              reportType: "regular" as const,
+              generationVersion: "gen-v1",
+              language: "ru" as const,
+              expiresAt: options.cacheEntryExpiresAt
+            }] : [];
+            const entries = options.cacheEntries ?? fallbackEntry;
+            const hasUserFilter = query.includes("WHERE user_id");
+            const [userArg, tickerArg, reportTypeArg, generationVersionArg, languageArg, nowArg] = hasUserFilter
+              ? statement.args
+              : [undefined, ...statement.args];
+            const entry = entries.find((candidate) =>
+              (!hasUserFilter || candidate.userId === userArg) &&
+              (candidate.ticker ?? "NVDA") === tickerArg &&
+              (candidate.reportType ?? "regular") === reportTypeArg &&
+              (candidate.generationVersion ?? "gen-v1") === generationVersionArg &&
+              (candidate.language ?? "ru") === languageArg &&
+              Date.parse(candidate.expiresAt) >= Date.parse(String(nowArg))
+            );
+            return entry ? { id: entry.id } as T : null as T;
           }
-          if (query.includes("FROM users WHERE id")) return { id: "user_1", status: "active" } as T;
+          if (query.includes("FROM users WHERE id")) {
+            const userId = String(statement.args[0]);
+            const user = options.users?.[userId] ?? { status: userId === "user_1" ? "active" : undefined };
+            return user.status ? { id: userId, status: user.status } as T : null as T;
+          }
           if (query.includes("FROM subscriptions")) return {
-            id: "sub_1",
-            plan: options.plan ?? "starter",
+            id: options.users?.[String(statement.args[0])]?.subscriptionId ?? "sub_1",
+            plan: options.users?.[String(statement.args[0])]?.plan ?? options.plan ?? "starter",
             status: options.subscriptionStatus ?? "active",
             current_period_end: options.currentPeriodEnd === undefined ? "2999-01-01T00:00:00Z" : options.currentPeriodEnd
           } as T;
@@ -135,7 +189,11 @@ function createQuotaEnv(options: {
               request_id: statement.args[0],
               ticker: statement.args[1],
               payload_hash: statement.args[2],
+              user_id: statement.args[3],
+              subscription_id: statement.args[4],
+              chat_id: statement.args[5],
               report_type: statement.args[6],
+              generation_version: statement.args[7],
               allowed: 0,
               charge_credits: 0,
               quota_decision: "rejected_no_access",
@@ -143,10 +201,11 @@ function createQuotaEnv(options: {
               report_source: "none",
               remaining_credits: null,
               cache_receipt_id: null,
+              cache_entry_id: null,
               reason: statement.args[14]
             });
           }
-          return { success: true };
+          return { success: true, meta: { changes: 1 } };
         }
       };
       return statement;
@@ -166,7 +225,11 @@ function createQuotaEnv(options: {
           request_id: insert.args[0],
           ticker: insert.args[1],
           payload_hash: insert.args[2],
+          user_id: insert.args[3],
+          subscription_id: insert.args[4],
+          chat_id: insert.args[5],
           report_type: insert.args[6],
+          generation_version: insert.args[7],
           allowed: allowed ? 1 : 0,
           charge_credits: allowed ? chargeCredits : 0,
           quota_decision: allowed ? decisionStatement?.args[1] : "rejected_no_quota",
@@ -174,6 +237,7 @@ function createQuotaEnv(options: {
           report_source: allowed ? decisionStatement?.args[2] : "none",
           remaining_credits: quotaLimitCredits - state.usedCredits,
           cache_receipt_id: null as string | null,
+          cache_entry_id: insert.args[14] as string | null,
           reason: allowed ? null : "quota_exceeded"
         };
         const receiptStatement = statements.find((statement) => statement.query.includes("INSERT OR IGNORE INTO cache_receipts"));
@@ -209,7 +273,7 @@ function createCacheCommitEnv(options: { expired?: boolean } = {}) {
   const state = {
     status: "pending",
     resultDigest: null as string | null,
-    cacheEntry: null as { id: string; expires_at: string; result_digest: string } | null
+    cacheEntry: null as { id: string; user_id: string; expires_at: string; result_digest: string } | null
   };
   const db = {
     prepare(query: string) {
@@ -249,7 +313,7 @@ function createCacheCommitEnv(options: { expired?: boolean } = {}) {
       if (state.status === "pending" && update && insert) {
         state.status = "committed";
         state.resultDigest = String(update.args?.[0]);
-        state.cacheEntry = { id: String(insert.args?.[0]), expires_at: String(insert.args?.[2]), result_digest: state.resultDigest };
+        state.cacheEntry = { id: String(insert.args?.[0]), user_id: "user_1", expires_at: String(insert.args?.[2]), result_digest: state.resultDigest };
       }
       return [];
     }
@@ -349,6 +413,17 @@ describe("scanner access quota", () => {
       remainingUnits: 89,
       reason: null
     });
+    expect(state.decisions.get("req_1:NVDA")).toMatchObject({
+      request_id: "req_1",
+      ticker: "NVDA",
+      user_id: "user_1",
+      subscription_id: "sub_1",
+      report_type: "regular",
+      generation_version: "gen-v1",
+      quota_decision: "new_regular",
+      cache_entry_id: null,
+      cache_receipt_id: expect.any(String)
+    });
     expect(state.usedCredits).toBe(22);
   });
 
@@ -382,8 +457,17 @@ describe("scanner access quota", () => {
         [0, "hit", 0.5],
         [-1, "miss", 1]
       ] as const) {
+        const expiresAt = new Date(Date.now() + offsetMinutes * 60 * 1000).toISOString();
         const { env, state } = createQuotaEnv({
-          cacheEntryExpiresAt: new Date(Date.now() + offsetMinutes * 60 * 1000).toISOString()
+          cacheEntries: [{
+            id: `cache-expiry-${offsetMinutes}`,
+            userId: "cache_owner",
+            ticker: "NVDA",
+            reportType: "regular",
+            generationVersion: "gen-v1",
+            language: "ru",
+            expiresAt
+          }]
         });
         const response = await scannerAccessCheck(JSON.stringify(scannerPayload({
           requestId: `req-cache-expiry-${offsetMinutes}`,
@@ -422,7 +506,7 @@ describe("scanner access quota", () => {
     expect(state.usedCredits).toBe(2);
   });
 
-  it("covers regular new, cached, refresh, and own-repeat decisions", async () => {
+  it("replays exact duplicate regular requestId+ticker decisions as the stored response", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-06-30T12:00:00.000Z"));
     try {
@@ -439,7 +523,17 @@ describe("scanner access quota", () => {
         { id: "refresh", extra: { forceRefresh: true }, decision: "refresh_regular", chargeUnits: 1, credits: 2, cache: true }
       ];
       for (const scenario of scenarios) {
-        const { env, state } = createQuotaEnv({ cacheEntryExpiresAt: scenario.cache ? "2026-06-30T13:00:00.000Z" : undefined });
+        const { env, state } = createQuotaEnv({
+          cacheEntries: scenario.cache ? [{
+            id: `cache-regular-${scenario.id}`,
+            userId: "cache_owner",
+            ticker: "NVDA",
+            reportType: "regular",
+            generationVersion: "gen-v1",
+            language: "ru",
+            expiresAt: "2026-06-30T13:00:00.000Z"
+          }] : undefined
+        });
         const body = JSON.stringify(scannerPayload({ requestId: `regular-${scenario.id}`, ...scenario.extra }));
         const firstResponse = await scannerAccessCheck(body, env);
         const first = await firstResponse.json() as Record<string, unknown>;
@@ -450,7 +544,8 @@ describe("scanner access quota", () => {
         expect(first).toMatchObject({ allowed: true, quotaDecision: scenario.decision, chargeUnits: scenario.chargeUnits });
         expect(typeof first.cacheReceiptId === "string").toBe(scenario.decision !== "cached_regular");
         expect(repeatResponse.status).toBe(200);
-        expect(repeat).toMatchObject({ allowed: true, quotaDecision: "own_repeat", chargeUnits: 0, reportSource: "own_repeat" });
+        expect(repeat).toMatchObject({ allowed: true, quotaDecision: scenario.decision, chargeUnits: scenario.chargeUnits });
+        expect((repeat as Record<string, unknown>).cacheReceiptId).toBe(first.cacheReceiptId);
         expect(state.usedCredits).toBe(scenario.credits);
       }
     } finally {
@@ -458,7 +553,7 @@ describe("scanner access quota", () => {
     }
   });
 
-  it("covers FundRep new, cached, refresh, and own-repeat decisions", async () => {
+  it("replays exact duplicate FundRep requestId+ticker decisions as the stored response", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-06-30T12:00:00.000Z"));
     try {
@@ -475,7 +570,17 @@ describe("scanner access quota", () => {
         { id: "refresh", extra: { forceRefresh: true }, decision: "refresh_fundrep", chargeUnits: 3, credits: 6, cache: true }
       ];
       for (const scenario of scenarios) {
-        const { env, state } = createQuotaEnv({ cacheEntryExpiresAt: scenario.cache ? "2026-06-30T13:00:00.000Z" : undefined });
+        const { env, state } = createQuotaEnv({
+          cacheEntries: scenario.cache ? [{
+            id: `cache-fundrep-${scenario.id}`,
+            userId: "cache_owner",
+            ticker: "NVDA",
+            reportType: "fundrep",
+            generationVersion: "gen-v1",
+            language: "ru",
+            expiresAt: "2026-06-30T13:00:00.000Z"
+          }] : undefined
+        });
         const body = JSON.stringify(scannerPayload({ requestId: `fundrep-${scenario.id}`, reportType: "fundrep", ...scenario.extra }));
         const firstResponse = await scannerAccessCheck(body, env);
         const first = await firstResponse.json() as Record<string, unknown>;
@@ -485,7 +590,8 @@ describe("scanner access quota", () => {
         expect(first).toMatchObject({ allowed: true, quotaDecision: scenario.decision, chargeUnits: scenario.chargeUnits });
         expect(typeof first.cacheReceiptId === "string").toBe(scenario.decision !== "cached_fundrep");
         expect(repeatResponse.status).toBe(200);
-        expect(repeat).toMatchObject({ allowed: true, quotaDecision: "own_repeat_fundrep", chargeUnits: 0, reportSource: "own_repeat" });
+        expect(repeat).toMatchObject({ allowed: true, quotaDecision: scenario.decision, chargeUnits: scenario.chargeUnits });
+        expect((repeat as Record<string, unknown>).cacheReceiptId).toBe(first.cacheReceiptId);
         expect(state.usedCredits).toBe(scenario.credits);
       }
     } finally {
@@ -554,9 +660,82 @@ describe("scanner access quota", () => {
     const replay = await (await scannerAccessCheck(body, env)).json();
 
     expect(first).toMatchObject({ chargeUnits: 1, quotaDecision: "new_regular" });
-    expect(replay).toMatchObject({ chargeUnits: 0, quotaDecision: "own_repeat", reportSource: "own_repeat" });
+    expect(replay).toMatchObject({ chargeUnits: 1, quotaDecision: "new_regular", reportSource: "new_analysis" });
+    expect((replay as Record<string, unknown>).cacheReceiptId).toBe((first as Record<string, unknown>).cacheReceiptId);
     expect(state.usedCredits).toBe(2);
     expect(state.batchCalls).toBe(1);
+  });
+
+  it("returns own_repeat for a new requestId from the owner of a fresh committed regular cache entry", async () => {
+    const { env, state } = createQuotaEnv({
+      usedCredits: 20,
+      cacheEntries: [{
+        id: "cache_owned_regular",
+        userId: "user_1",
+        ticker: "NVDA",
+        reportType: "regular",
+        generationVersion: "gen-v1",
+        language: "ru",
+        expiresAt: "2999-01-01T00:00:00.000Z"
+      }]
+    });
+
+    const response = await scannerAccessCheck(JSON.stringify(scannerPayload({ requestId: "req-owner-repeat" })), env);
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      allowed: true,
+      chargeUnits: 0,
+      quotaDecision: "own_repeat",
+      cacheStatus: "hit",
+      reportSource: "own_repeat",
+      cacheReceiptId: null,
+      cacheEntryId: "cache_owned_regular"
+    });
+    expect(state.usedCredits).toBe(20);
+    expect(state.decisions.get("req-owner-repeat:NVDA")).toMatchObject({
+      quota_decision: "own_repeat",
+      cache_entry_id: "cache_owned_regular"
+    });
+  });
+
+  it("returns cached_regular at cached price for a new requestId from another user", async () => {
+    const { env, state } = createQuotaEnv({
+      usedCredits: 20,
+      users: {
+        user_2: { status: "active", subscriptionId: "sub_2", plan: "starter" }
+      },
+      cacheEntries: [{
+        id: "cache_other_regular",
+        userId: "user_1",
+        ticker: "NVDA",
+        reportType: "regular",
+        generationVersion: "gen-v1",
+        language: "ru",
+        expiresAt: "2999-01-01T00:00:00.000Z"
+      }]
+    });
+
+    const response = await scannerAccessCheck(JSON.stringify(scannerPayload({
+      requestId: "req-other-user-cache",
+      userId: "user_2"
+    })), env);
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      allowed: true,
+      chargeUnits: 0.5,
+      quotaDecision: "cached_regular",
+      cacheStatus: "hit",
+      reportSource: "cache",
+      cacheReceiptId: null,
+      cacheEntryId: "cache_other_regular"
+    });
+    expect(state.usedCredits).toBe(21);
+    expect(state.decisions.get("req-other-user-cache:NVDA")).toMatchObject({
+      quota_decision: "cached_regular",
+      cache_entry_id: "cache_other_regular"
+    });
   });
 
   it("allows one requestId to contain multiple tickers with independent charges", async () => {
@@ -610,6 +789,10 @@ describe("core-owned cache receipt commit", () => {
       await expect(replay.json()).resolves.toEqual(firstPayload);
       expect(firstPayload).toMatchObject({ contractVersion: "1.1", committed: true, expiresAt: "2026-07-01T13:00:00.000Z" });
       expect(state.status).toBe("committed");
+      expect(state.cacheEntry).toMatchObject({
+        user_id: "user_1",
+        result_digest: "a".repeat(64)
+      });
     } finally {
       vi.useRealTimers();
     }
@@ -721,7 +904,7 @@ describe("internal Telegram delivery", () => {
   it("retries an explicit Telegram rejection but blocks an indeterminate outcome", async () => {
     const retryFixture = deliveryEnv();
     const fetchMock = vi.fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: false, description: "temporary rejection" }), { status: 502 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: false, error_code: 400, description: "Bad Request: chat not found @secret_channel" }), { status: 400 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, result: { message_id: 100 } }), { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
     const body = JSON.stringify(payload());
@@ -729,7 +912,7 @@ describe("internal Telegram delivery", () => {
 
     const failed = await internalDeliver(request, body, retryFixture.env, testExecutionContext());
     expect(failed.status).toBe(503);
-    await expect(failed.json()).resolves.toMatchObject({ reason: "telegram_delivery_rejected", retryable: true });
+    await expect(failed.json()).resolves.toMatchObject({ reason: "telegram_delivery_rejected:400:Bad Request: chat not found @[redacted]", retryable: true });
     const retried = await internalDeliver(request, body, retryFixture.env, testExecutionContext());
     await expect(retried.json()).resolves.toMatchObject({ status: "sent", telegramMessageId: "100" });
 
@@ -817,6 +1000,47 @@ describe("subscription signature", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({ userId: "user_1", status: "active" });
     expect(subscriptionWritten).toBe(true);
+  });
+
+  it("replays provider subscription events without inserting a duplicate subscription", async () => {
+    const rawBody = JSON.stringify({ userId: "user_1", status: "active", plan: "pro", provider: "website", externalId: "evt_1" });
+    const timestamp = Math.floor(Date.now() / 1000).toString();
+    const secret = "webhook-secret";
+    const signature = await testHmacHex(secret, `${timestamp}.${rawBody}`);
+    let inserted = false;
+    let updated = false;
+    const env = createEnv({
+      first(query) {
+        if (query.includes("FROM rate_limits")) return null;
+        if (query.includes("SELECT id FROM subscriptions WHERE provider")) return { id: "sub_existing" };
+        if (query.includes("FROM users WHERE id")) return { id: "user_1", country: "IL" };
+        if (query.includes("FROM subscriptions")) return { status: "active", current_period_end: "2999-01-01T00:00:00Z" };
+        return null;
+      },
+      all(query) {
+        if (query.includes("FROM user_country_links")) return [];
+        return [];
+      },
+      run(query) {
+        if (query.includes("INSERT INTO subscriptions")) inserted = true;
+        if (query.includes("UPDATE subscriptions")) updated = true;
+      }
+    }, { SUBSCRIPTION_WEBHOOK_SECRET: secret });
+
+    const response = await worker.fetch(new Request("https://example.test/api/subscriptions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Timestamp": timestamp,
+        "X-Signature": `sha256=${signature}`
+      },
+      body: rawBody
+    }), env, testExecutionContext());
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ subscriptionId: "sub_existing", replayed: true });
+    expect(inserted).toBe(false);
+    expect(updated).toBe(true);
   });
 
   it("does not attach a subscription using an unverified email-only identity", async () => {
@@ -1055,6 +1279,217 @@ describe("Telegram init data", () => {
     expect(insertedUserQuery).toContain("VALUES (?, ?, NULL, ?");
     expect(insertedUserArgs).toContain("alex@example.com");
   });
+
+  it("bootstraps a Core session from signed Telegram init data without trusting browser email or userId", async () => {
+    const botToken = "123:test-token";
+    const initData = await signedTelegramInitData(botToken, { id: 42, first_name: "Alex", language_code: "he" });
+    let insertedUserArgs: unknown[] = [];
+    let sessionCreated = false;
+    const env = createEnv({
+      first(query) {
+        if (query.includes("FROM users WHERE telegram_user_id")) return null;
+        if (query.includes("SELECT * FROM users WHERE id")) return {
+          id: "created_user",
+          telegram_user_id: "42",
+          email: null,
+          email_verified_at: null,
+          pending_email: null,
+          display_name: "Alex",
+          language: "he",
+          country: "IL",
+          selected_bot_url: null,
+          status: "active",
+          created_at: "2026-06-01T00:00:00Z",
+          updated_at: "2026-06-01T00:00:00Z",
+          last_seen_at: null
+        };
+        return null;
+      },
+      all(query) {
+        if (query.includes("FROM user_country_links")) return [];
+        return [];
+      },
+      run(query, args) {
+        if (query.includes("INSERT INTO users")) insertedUserArgs = args;
+        if (query.includes("INSERT INTO user_sessions")) sessionCreated = true;
+      }
+    }, { TELEGRAM_BOT_TOKEN: botToken, DEFAULT_COUNTRY: "IL" });
+
+    const response = await worker.fetch(new Request("https://example.test/api/session/bootstrap", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider: "telegram", initData, userId: "attacker", email: "attacker@example.com" })
+    }), env, testExecutionContext());
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Set-Cookie")).toContain("ms_session=");
+    await expect(response.json()).resolves.toMatchObject({ identityProvider: "telegram", csrfTokenRequired: true });
+    expect(sessionCreated).toBe(true);
+    expect(insertedUserArgs).toContain("42");
+    expect(insertedUserArgs).not.toContain("attacker");
+    expect(insertedUserArgs).not.toContain("attacker@example.com");
+  });
+
+  it("refreshes CSRF token using only a valid Core session cookie", async () => {
+    const tokenHash = await testSha256("raw-token");
+    const oldCsrfHash = await testSha256("old-csrf-token");
+    let updatedCsrfHash = "";
+    const env = createEnv({
+      first(query) {
+        if (query.includes("FROM user_sessions")) return {
+          user_id: "user_1",
+          token_hash: tokenHash,
+          csrf_hash: oldCsrfHash,
+          expires_at: "2999-01-01T00:00:00Z",
+          id: "user_1",
+          telegram_user_id: "42",
+          email: "user@example.com",
+          email_verified_at: "2026-06-01T00:00:00Z",
+          pending_email: null,
+          display_name: "User",
+          language: "en",
+          country: "IL",
+          selected_bot_url: null,
+          status: "active",
+          created_at: "2026-06-01T00:00:00Z",
+          updated_at: "2026-06-01T00:00:00Z",
+          last_seen_at: null
+        };
+        return null;
+      },
+      run(query, args) {
+        if (query.includes("UPDATE user_sessions SET csrf_hash")) updatedCsrfHash = String(args[0]);
+      }
+    });
+
+    const response = await worker.fetch(new Request("https://example.test/api/session/csrf", {
+      headers: { Cookie: "ms_session=session_1.raw-token" }
+    }), env, testExecutionContext());
+    const payload = await response.json() as { csrfToken: string };
+
+    expect(response.status).toBe(200);
+    expect(payload.csrfToken).toBeTruthy();
+    expect(await testSha256(payload.csrfToken)).toBe(updatedCsrfHash);
+  });
+});
+
+describe("Telegram private ticker requests", () => {
+  const telegramUser = {
+    id: "user_1",
+    telegram_user_id: "42",
+    email: "user@example.com",
+    email_verified_at: "2026-06-01T00:00:00Z",
+    pending_email: null,
+    display_name: "User",
+    language: "he",
+    country: "IL",
+    selected_bot_url: null,
+    status: "active",
+    created_at: "2026-06-01T00:00:00Z",
+    updated_at: "2026-06-01T00:00:00Z",
+    last_seen_at: null
+  };
+
+  function telegramUpdate(text: string, chatType = "private") {
+    return {
+      update_id: 1,
+      message: {
+        chat: { id: 42, type: chatType },
+        from: { id: 42, first_name: "User" },
+        text
+      }
+    };
+  }
+
+  function privateTickerEnv(options: { plan?: string; currentPeriodEnd?: string | null; usedCredits?: number; quotaLimitCredits?: number } = {}) {
+    const state = { analysisInserted: false };
+    const env = createEnv({
+      first(query) {
+        if (query.includes("FROM users WHERE telegram_user_id")) return telegramUser;
+        if (query.includes("FROM subscriptions")) return {
+          id: "sub_1",
+          plan: options.plan ?? "pro",
+          status: "active",
+          current_period_end: options.currentPeriodEnd === undefined ? "2999-01-01T00:00:00Z" : options.currentPeriodEnd
+        };
+        if (query.includes("FROM quota_balances")) return {
+          quota_limit_credits: options.quotaLimitCredits ?? 50,
+          used_credits: options.usedCredits ?? 0
+        };
+        return null;
+      },
+      run(query) {
+        if (query.includes("INSERT INTO analysis_requests")) state.analysisInserted = true;
+      }
+    }, { TELEGRAM_BOT_TOKEN: "telegram-token" });
+    return { env, state };
+  }
+
+  it("allows premium users to request private ticker analysis", async () => {
+    const { env, state } = privateTickerEnv({ plan: "pro" });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 })));
+
+    const response = await worker.fetch(new Request("https://example.test/api/telegram/webhook", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(telegramUpdate("NVDA"))
+    }), env, testExecutionContext());
+
+    expect(response.status).toBe(200);
+    expect(state.analysisInserted).toBe(true);
+    expect(vi.mocked(fetch)).toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it("blocks free or basic users from private ticker analysis while keeping channel access separate", async () => {
+    const { env, state } = privateTickerEnv({ plan: "starter" });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 })));
+
+    await worker.fetch(new Request("https://example.test/api/telegram/webhook", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(telegramUpdate("NVDA"))
+    }), env, testExecutionContext());
+
+    expect(state.analysisInserted).toBe(false);
+    const sentBody = JSON.parse(String(vi.mocked(fetch).mock.calls[0]?.[1]?.body));
+    expect(sentBody.text).toContain("premium plan");
+    vi.unstubAllGlobals();
+  });
+
+  it("blocks private ticker analysis when quota is exhausted or subscription is expired", async () => {
+    for (const scenario of [
+      { env: privateTickerEnv({ plan: "pro", usedCredits: 50, quotaLimitCredits: 50 }), expected: "quota" },
+      { env: privateTickerEnv({ plan: "pro", currentPeriodEnd: "2000-01-01T00:00:00Z" }), expected: "ended" }
+    ]) {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 })));
+      await worker.fetch(new Request("https://example.test/api/telegram/webhook", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(telegramUpdate("NVDA"))
+      }), scenario.env.env, testExecutionContext());
+
+      expect(scenario.env.state.analysisInserted).toBe(false);
+      const sentBody = JSON.parse(String(vi.mocked(fetch).mock.calls[0]?.[1]?.body));
+      expect(sentBody.text.toLowerCase()).toContain(scenario.expected);
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("does not accept ticker requests from broadcast channels or groups", async () => {
+    const { env, state } = privateTickerEnv({ plan: "pro" });
+    vi.stubGlobal("fetch", vi.fn());
+
+    await worker.fetch(new Request("https://example.test/api/telegram/webhook", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(telegramUpdate("NVDA", "channel"))
+    }), env, testExecutionContext());
+
+    expect(state.analysisInserted).toBe(false);
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
 });
 
 describe("country links", () => {
@@ -1220,6 +1655,70 @@ describe("SaaS account endpoints", () => {
     });
   });
 
+  it("returns a website-safe subscription summary with entitlements and quota", async () => {
+    const tokenHash = await testSha256("raw-token");
+    const csrfHash = await testSha256("csrf-token");
+    const env = createEnv({
+      first(query) {
+        if (query.includes("FROM user_sessions")) return {
+          user_id: "user_1",
+          token_hash: tokenHash,
+          csrf_hash: csrfHash,
+          expires_at: "2999-01-01T00:00:00Z",
+          id: "user_1",
+          telegram_user_id: "42",
+          email: "user@example.com",
+          email_verified_at: "2026-06-01T00:00:00Z",
+          display_name: "User",
+          language: "en",
+          country: "IL",
+          selected_bot_url: null,
+          status: "active",
+          created_at: "2026-06-01T00:00:00Z",
+          updated_at: "2026-06-01T00:00:00Z",
+          last_seen_at: null
+        };
+        if (query.includes("SELECT status, current_period_end")) return { status: "active", current_period_end: "2999-01-01T00:00:00Z" };
+        if (query.includes("FROM quota_balances")) return { quota_limit_credits: 50, used_credits: 10 };
+        return null;
+      },
+      all(query) {
+        if (query.includes("FROM subscriptions")) return [{
+          id: "sub_1",
+          provider: "website",
+          external_id: "evt_1",
+          plan: "pro",
+          status: "active",
+          current_period_end: "2999-01-01T00:00:00Z",
+          created_at: "2026-06-01T00:00:00Z",
+          updated_at: "2026-06-01T00:00:00Z"
+        }];
+        if (query.includes("FROM user_country_links")) return [{ country: "IL", bot_url: "https://t.me/Israel_News_Ticker_Scanner_bot", is_active: 1 }];
+        return [];
+      }
+    }, { SUBSCRIPTION_CHECKOUT_URL: "https://checkout.example/start", SUBSCRIPTION_PORTAL_URL: "https://checkout.example/portal" });
+
+    const response = await worker.fetch(new Request("https://example.test/api/me/subscription", {
+      headers: { Cookie: "ms_session=session_1.raw-token" }
+    }), env, testExecutionContext());
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      userId: "user_1",
+      allowed: true,
+      summary: {
+        plan: "pro",
+        status: "active",
+        renewalState: "renews",
+        canManageBilling: true,
+        canStartCheckout: true,
+        entitlements: { channelAccess: true, privateAnalysis: true, apiAccess: true },
+        quota: { limitCredits: 50, usedCredits: 10, remainingCredits: 40 },
+        channelLinks: [{ country: "IL", botUrl: "https://t.me/Israel_News_Ticker_Scanner_bot", isActive: true }]
+      }
+    });
+  });
+
   it("requires CSRF for cookie-authenticated API key writes", async () => {
     const tokenHash = await testSha256("raw-token");
     const csrfHash = await testSha256("csrf-token");
@@ -1257,6 +1756,60 @@ describe("SaaS account endpoints", () => {
     expect(response.status).toBe(403);
     await expect(response.json()).resolves.toMatchObject({ error: "csrf_token_required" });
   });
+
+  it("denies website private analysis requests for non-premium plans", async () => {
+    const tokenHash = await testSha256("raw-token");
+    const csrfHash = await testSha256("csrf-token");
+    let analysisInserted = false;
+    const env = createEnv({
+      first(query) {
+        if (query.includes("FROM rate_limits")) return null;
+        if (query.includes("FROM user_sessions")) return {
+          user_id: "user_1",
+          token_hash: tokenHash,
+          csrf_hash: csrfHash,
+          expires_at: "2999-01-01T00:00:00Z",
+          id: "user_1",
+          telegram_user_id: "42",
+          email: "user@example.com",
+          email_verified_at: "2026-06-01T00:00:00Z",
+          display_name: "User",
+          language: "en",
+          country: "IL",
+          selected_bot_url: null,
+          status: "active",
+          created_at: "2026-06-01T00:00:00Z",
+          updated_at: "2026-06-01T00:00:00Z",
+          last_seen_at: null
+        };
+        if (query.includes("FROM subscriptions")) return {
+          id: "sub_1",
+          plan: "starter",
+          status: "active",
+          current_period_end: "2999-01-01T00:00:00Z"
+        };
+        if (query.includes("FROM quota_balances")) return { quota_limit_credits: 50, used_credits: 0 };
+        return null;
+      },
+      run(query) {
+        if (query.includes("INSERT INTO analysis_requests")) analysisInserted = true;
+      }
+    });
+
+    const response = await worker.fetch(new Request("https://example.test/api/me/analysis-requests", {
+      method: "POST",
+      headers: {
+        Cookie: "ms_session=session_1.raw-token",
+        "Content-Type": "application/json",
+        "X-CSRF-Token": "csrf-token"
+      },
+      body: JSON.stringify({ ticker: "NVDA" })
+    }), env, testExecutionContext());
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toMatchObject({ error: "private_analysis_access_denied", reason: "premium_plan_required" });
+    expect(analysisInserted).toBe(false);
+  });
 });
 
 describe("CORS", () => {
@@ -1264,6 +1817,18 @@ describe("CORS", () => {
     const env = { ALLOWED_ORIGINS: "https://app.example,https://admin.example" };
     expect(allowedCorsOrigin(new Request("https://api.example", { headers: { Origin: "https://app.example" } }), env)).toBe("https://app.example");
     expect(allowedCorsOrigin(new Request("https://api.example", { headers: { Origin: "https://evil.example" } }), env)).toBeNull();
+  });
+
+  it("does not expose internal subscription route as a browser-trusted endpoint", async () => {
+    const response = await worker.fetch(new Request("https://example.test/api/internal/subscriptions", {
+      method: "POST",
+      headers: { Origin: "https://app.example", "Content-Type": "application/json" },
+      body: "{}"
+    }), createEnv({}, { ALLOWED_ORIGINS: "https://app.example" }), testExecutionContext());
+
+    expect(response.status).toBe(401);
+    expect(response.headers.get("Access-Control-Allow-Origin")).toBeNull();
+    await expect(response.json()).resolves.toMatchObject({ error: "internal_key_and_request_id_required" });
   });
 });
 
@@ -1486,6 +2051,76 @@ describe("internal endpoint auth", () => {
 
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toMatchObject({ reason: "invalid_contract_version" });
+  });
+
+  it("logs safe scanner access diagnostics for the trailing slash alias", async () => {
+    const secret = "internal-secret-with-at-least-32-bytes";
+    const timestamp = Math.floor(Date.now() / 1000).toString();
+    const body = JSON.stringify(scannerPayload({
+      requestId: "req-diagnostic-trailing",
+      ticker: "NVDA"
+    }));
+    const bodyHash = await testSha256(body);
+    const keyId = "scanner-dev-v2";
+    const requestId = "req-diagnostic-trailing";
+    const signature = await testHmacHex(secret, `${timestamp}.${keyId}.${requestId}.POST./api/internal/access/check/..${bodyHash}`);
+    const { env } = createQuotaEnv();
+    env.INTERNAL_API_SECRET = secret;
+    env.INTERNAL_API_KEY_ID = keyId;
+    env.INTERNAL_API_SCOPES_JSON = JSON.stringify({ [keyId]: ["scanner:access"] });
+    env.CF_VERSION_METADATA = { id: "version-test-1" };
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    let diagnostics: Array<Record<string, unknown>> = [];
+
+    try {
+      const response = await worker.fetch(new Request("https://example.test/api/internal/access/check/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Key-Id": keyId,
+          "X-Request-Id": requestId,
+          "X-Timestamp": timestamp,
+          "X-Signature": `sha256=${signature}`
+        },
+        body
+      }), env, testExecutionContext());
+      const payload = await response.json();
+      expect(response.status).toBe(200);
+      expect(payload).toMatchObject({
+        allowed: true,
+        cacheStatus: "miss",
+        quotaDecision: "new_regular",
+        cacheReceiptId: expect.any(String)
+      });
+      diagnostics = logSpy.mock.calls.map(([message]) => JSON.parse(String(message)) as Record<string, unknown>);
+    } finally {
+      logSpy.mockRestore();
+    }
+
+    expect(diagnostics).toHaveLength(3);
+    for (const entry of diagnostics) {
+      expect(Object.keys(entry).sort()).toEqual([
+        "deploymentVersionId",
+        "keyId",
+        "matchedHandler",
+        "method",
+        "pathname",
+        "requestId",
+        "timestamp"
+      ].sort());
+      expect(entry).toMatchObject({
+        method: "POST",
+        pathname: "/api/internal/access/check/",
+        requestId,
+        keyId,
+        deploymentVersionId: "version-test-1"
+      });
+    }
+    expect(diagnostics.map((entry) => entry.matchedHandler)).toEqual([
+      "internal_access_check.matched",
+      "internal_access_check.hmac_validated",
+      "scannerAccessCheck"
+    ]);
   });
 
   it("keeps the trailing slash path bound into the HMAC signature", async () => {

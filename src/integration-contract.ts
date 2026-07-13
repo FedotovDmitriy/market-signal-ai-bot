@@ -143,6 +143,7 @@ export type ScannerAccessCheckResponse = {
   remainingUnits: number | null;
   reason: string | null;
   cacheReceiptId: string | null;
+  cacheEntryId: string | null;
 };
 
 export type ScannerCacheCommitRequest = {

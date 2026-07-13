@@ -8,7 +8,9 @@ Last updated: 2026-06-23.
 
 Market Signal AI should feel like a commercial SaaS workspace first, with Telegram as a fast account and delivery control surface.
 
-The website owns discovery, pricing, signup, onboarding, dashboard, ticker analysis, API access, reports, billing, and admin monitoring. Telegram owns quick account entry, channel access, lightweight settings, and delivery confirmations.
+The website owns discovery, pricing, signup, onboarding, dashboard, ticker analysis, API access, reports, billing, and admin monitoring. Telegram owns quick account entry, read-only country/language news channel access, lightweight settings, private premium ticker requests, and delivery confirmations.
+
+Country/language Telegram channels are read-only broadcast feeds. Personal ticker analysis is a separate premium action available only through the website, API, or a private Telegram bot flow after account, subscription, and quota checks.
 
 ## Dashboard UX Map
 
@@ -17,14 +19,14 @@ Primary dashboard goal: help a subscribed user understand account state, access 
 ```mermaid
 flowchart TD
   A["Dashboard Home"] --> B["Subscription State"]
-  A --> C["Selected Countries And Languages"]
-  A --> D["Signal Queue"]
+  A --> C["Read-Only Channel Access"]
+  A --> D["Private Analysis Access"]
   A --> E["Reports Snapshot"]
   A --> F["API Usage Snapshot"]
   A --> G["Telegram Delivery Status"]
   B --> H["Billing"]
-  C --> I["Countries / Channels"]
-  D --> J["Ticker Analysis"]
+  C --> I["Countries / Languages"]
+  D --> J["Ticker Analysis / Private Bot"]
   E --> K["Report History"]
   F --> L["API Access"]
   G --> M["Telegram Quick Entry"]
@@ -34,10 +36,11 @@ Dashboard modules:
 
 - Account header: workspace name, plan, renewal/access badge.
 - Metrics strip: active feeds, reports generated, API calls, Telegram users/deliveries.
-- Signal queue: recent ticker/news items with status and review action.
+- Broadcast feed panel: selected read-only country/language channels and join/open actions.
+- Private analysis panel: premium ticker analysis availability, quota, and entry points.
 - News heat: topic/category intensity without investment-instruction language.
 - Access panel: active, expired, blocked, or setup-required subscription state.
-- Quick actions: analyze ticker, manage countries, open reports, manage API keys.
+- Quick actions: join/read channels, start private bot, analyze ticker, open reports, manage API keys.
 - Compliance notice: compact persistent note saying analysis is informational only.
 
 ## First Wireframe List
@@ -68,27 +71,28 @@ Dashboard modules:
 
 ### Onboarding After Registration
 
-- Stepper: choose markets, connect Telegram, activate plan.
+- Stepper: choose markets, connect Telegram, activate plan, enable private analysis if plan allows.
 - Country/language selection appears before Telegram delivery choice.
 - Subscription/access state appears before final "Finish setup".
-- Telegram connection is optional for website/API-only users.
+- Telegram connection is optional for website/API-only users, but required for private Telegram bot requests.
 - Empty state: "No countries selected yet" with add-country action.
 
 ### User Dashboard
 
 - Sidebar app navigation.
-- Header with plan/access badge and primary action "Analyze ticker".
+- Header with plan/access badge and primary action "Analyze ticker privately".
 - Metrics strip and signal queue.
-- News heat or topic intensity panel.
+- Read-only channel access panel and private analysis quota panel.
 - Persistent compliance notice.
 - Expired state: account remains manageable; paid analysis, Telegram delivery, and API may be unavailable.
 
 ### Countries / Languages / Channels
 
-- Country cards with language, delivery mode, status, and linked Telegram bot/channel.
+- Country cards with language, read-only channel status, and linked Telegram channel.
 - Active, draft, planned, and blocked status badges.
 - Add/edit flow should show plan limits.
 - Blocked state: "Not available on your current plan or subscription status."
+- Card copy must say users read these channels; they do not submit ticker requests there.
 
 ### API Access
 
@@ -100,11 +104,12 @@ Dashboard modules:
 
 ### Ticker Analysis
 
-- Input/search row for ticker.
+- Input/search row for ticker as private analysis.
 - First-use disclaimer modal before first analysis.
 - Result layout: summary, confidence, risk notes, strategy notes, source/news context.
 - Copy must avoid buy/sell/hold instructions.
 - Result footer disclaimer visible on every output.
+- Request context must show where the private result is delivered: website result, API response, or private bot reply.
 
 ### Report History
 
@@ -215,6 +220,121 @@ UX requirements:
 - Allow changing email before confirmation.
 - Paid checkout should be blocked until email is confirmed unless manager explicitly accepts a different risk.
 
+## Read-Only Channels And Private Premium Analysis
+
+### Product Separation
+
+The UI must make two capabilities feel related but separate:
+
+- Read-only country/language channels: broadcast market news and informational signals to all channel subscribers who have access.
+- Private ticker analysis: user-requested premium analysis returned only to that user through website, API, or private Telegram bot.
+
+Do not use country/language channels as request surfaces. They are destinations for broadcast delivery only.
+
+### Dashboard Controls
+
+Dashboard should show two adjacent cards:
+
+1. Channel access
+   - Title: "Read-only news channels"
+   - Status: active, pending setup, blocked, or unavailable.
+   - Actions: open channel, manage countries/languages, upgrade if plan does not include the feed.
+   - Copy: "These channels broadcast market news to subscribers. Do not send ticker requests here."
+
+2. Private analysis
+   - Title: "Private ticker analysis"
+   - Status: available, upgrade required, quota reached, expired, or payment failed.
+   - Actions: analyze ticker, start private bot, view API access, manage billing.
+   - Copy: "Personal analysis requests are private and use your plan quota."
+
+### Countries / Channels Screen
+
+Each country/language card should include:
+
+- Country and language.
+- Channel type: "Read-only broadcast channel".
+- Delivery destination: Telegram channel or website feed.
+- Access state: active, no subscription, expired, pending route, planned.
+- CTA: "Open channel" or "Manage access".
+- Helper text: "Ticker requests are handled privately through the bot, website, or API."
+
+### Private Ticker Analysis Entry Points
+
+Website:
+
+- Button: "Analyze ticker privately".
+- Helper: "Private results are visible only in your account and report history."
+
+Private Telegram bot:
+
+- Button: "Start private bot".
+- Helper: "Send ticker requests only in the private bot chat. Country channels are read-only."
+
+API:
+
+- Button: "Create API key".
+- Helper: "API requests use plan quota and return private results to your integration."
+
+### Telegram Onboarding Screens / Text
+
+Screen 1: Connect Telegram
+
+> Connect Telegram to open your news channels and optional private analysis bot.
+
+Screen 2: Join news channels
+
+> News channels are read-only broadcasts by country and language. Everyone with channel access can see channel messages.
+
+CTA:
+
+> Open read-only channel
+
+Screen 3: Start private bot
+
+> Use the private bot for personal ticker analysis. Results are sent only in your private chat and use your plan quota.
+
+CTA:
+
+> Start private analysis bot
+
+Screen 4: Quota
+
+> Private ticker requests use your plan quota. Channel broadcasts do not spend your personal analysis quota.
+
+### Microcopy
+
+Dashboard:
+
+> Read-only channels broadcast market news to subscribers. Private ticker analysis is separate and uses your plan quota.
+
+Channels page:
+
+> Channel messages are visible to channel subscribers. Do not send ticker requests in country channels.
+
+Private bot entry:
+
+> Send ticker requests here for private analysis. Results are not posted to public or country channels.
+
+Quota label:
+
+> Private analysis quota
+
+No premium access:
+
+> Your plan includes read-only channel access, but private ticker analysis requires a premium plan.
+
+Quota reached:
+
+> You have used your private analysis quota for this period. Upgrade or wait for the quota reset.
+
+Expired subscription:
+
+> Your subscription has ended. Channel access and private analysis may be unavailable until you renew.
+
+Public/private safety note:
+
+> Channel broadcasts are shared with channel subscribers. Personal analysis results are delivered only through private bot, website, or API.
+
 ## Merchant Of Record Checkout UX
 
 Target providers: Paddle or Lemon Squeezy.
@@ -265,9 +385,9 @@ Placement rules:
 ### Active
 
 - Badge: "Active".
-- Primary action: analyze ticker or view reports.
-- Secondary actions: manage countries, API keys, billing.
-- Copy: "Your plan is active. Paid analysis, Telegram delivery, and API access are available within plan limits."
+- Primary action: open read-only channels or analyze ticker privately.
+- Secondary actions: start private bot, manage countries, API keys, billing.
+- Copy: "Your plan is active. Read-only channels and private analysis are available within plan limits."
 
 ### Expired
 
@@ -282,7 +402,7 @@ Placement rules:
 - Badge: "No subscription".
 - Primary action: choose plan.
 - Show limited product preview and account setup.
-- Copy: "Choose a plan to unlock paid analysis, Telegram delivery, and API access."
+- Copy: "Choose a plan to unlock read-only channels, private ticker analysis, and API access."
 
 ### API Limit Reached
 
@@ -290,6 +410,13 @@ Placement rules:
 - Primary action: upgrade plan or wait until reset.
 - Show quota, reset time, and last API usage.
 - Copy: "Your API limit for this period has been reached. Upgrade your plan or wait for the quota reset."
+
+### Private Analysis Quota Reached
+
+- Badge: "Private analysis quota reached".
+- Primary action: upgrade plan or wait until reset.
+- Keep read-only channel access visible if the subscription still allows it.
+- Copy: "You have used your private ticker analysis quota for this period. Read-only channels may remain available under your plan."
 
 ### Payment Failed
 
@@ -391,9 +518,11 @@ Telegram WebApp should include:
 
 - Quick account registration from Telegram init data.
 - Email capture and basic profile confirmation.
-- Country/language selection for Telegram news chats.
-- View linked country chat links.
-- Remove a linked country chat.
+- Country/language selection for read-only Telegram news channels.
+- View linked read-only channel links.
+- Remove a linked channel from the account.
+- Start private Telegram bot flow if the plan allows personal ticker analysis.
+- Show private analysis quota status.
 - Subscription unlock prompt or checkout redirect.
 - Short legal notice and `/start` disclaimer.
 
@@ -403,6 +532,7 @@ Full website should include:
 - Full signup/login and onboarding.
 - Dashboard and signal queue.
 - Ticker analysis workspace.
+- Private ticker analysis quota and plan gating.
 - Report history and exports.
 - API key management, usage, and API Terms acceptance.
 - Billing/subscription management.
@@ -416,6 +546,7 @@ Do not put heavy SaaS workflows into Telegram:
 - Report archive management.
 - Admin monitoring.
 - Dense ticker analysis review.
+- Country/language broadcast channel request handling.
 
 ## Open UX Questions
 

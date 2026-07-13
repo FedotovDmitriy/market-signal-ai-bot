@@ -2,7 +2,7 @@
 
 Status: pre-provider checklist; final review pending Paddle or Lemon Squeezy selection.
 Owner: Oleg.
-Last updated: 2026-06-24.
+Last updated: 2026-07-10.
 
 This checklist defines what Legal/Compliance must review before the first paid launch of Market Signal AI.
 
@@ -102,6 +102,24 @@ Billing/account UI must show:
 - support route for billing questions;
 - links to Terms, Subscription Terms, Refund Policy, and Risk Disclaimer.
 
+### Website Subscription Settings
+
+Website subscription settings must show:
+
+- current plan;
+- subscription status;
+- renewal date or trial end date;
+- cancellation state;
+- payment failure or past-due state;
+- channel access;
+- API availability;
+- private-analysis entitlement;
+- quota or usage summary;
+- checkout or manage-billing action only through approved Core/provider URLs;
+- links to Terms, Subscription Terms, Refund Policy, Privacy Policy, and Risk Disclaimer.
+
+Browser code must use user-session endpoints only. HMAC subscription event intake must remain backend/Worker-only and must never be called directly from browser code.
+
 ### Webhooks And Subscription Status
 
 Legal/compliance must confirm the product maps provider events into user-facing statuses consistently:
@@ -147,6 +165,7 @@ Paid launch is blocked until:
 - legal acceptance records store version and timestamp;
 - Risk Disclaimer appears in pricing/checkout and first analysis flow;
 - no UI copy promises profit or personal investment advice;
+- subscription settings do not imply that paid access includes investment advice, personalized recommendations, guaranteed outcomes, auto-trading, copy trading, broker execution, or portfolio management;
 - securities/investment-adviser perimeter review is assigned for target markets;
 - CPA/bookkeeper setup for MoR payouts, refunds, chargebacks, and deferred revenue is assigned.
 
@@ -167,4 +186,3 @@ Paid launch is blocked until:
 - Confirm monthly/annual/API/custom report refund posture.
 - Confirm who owns billing support.
 - Confirm whether any B2B/API customer needs a custom agreement before MVP.
-

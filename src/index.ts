@@ -23,6 +23,12 @@ export interface Env {
   SUBSCRIPTION_WEBHOOK_SECRET?: string;
   ALLOW_UNVERIFIED_TELEGRAM?: string;
   SUBSCRIPTION_CHECKOUT_URL?: string;
+  SUBSCRIPTION_PORTAL_URL?: string;
+  CF_VERSION_METADATA?: {
+    id?: string;
+    tag?: string;
+    timestamp?: string;
+  };
 }
 
 type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
@@ -105,7 +111,7 @@ type TelegramWebAppUser = {
 type TelegramUpdate = {
   update_id: number;
   message?: {
-    chat?: { id: number | string };
+    chat?: { id: number | string; type?: string };
     text?: string;
     from?: TelegramWebAppUser;
   };
@@ -168,6 +174,7 @@ type QuotaDecisionRowV11 = {
   report_source: "new_analysis" | "cache" | "own_repeat" | "none";
   remaining_credits: number | null;
   cache_receipt_id: string | null;
+  cache_entry_id: string | null;
   reason: string | null;
 };
 
@@ -219,6 +226,7 @@ const ACTIVE_SUBSCRIPTION_STATUSES = ["trialing", "active"] as const;
 const SESSION_COOKIE_NAME = "ms_session";
 const SESSION_TTL_SECONDS = 60 * 60 * 24 * 30;
 const API_KEY_SCOPES = ["analysis:read", "analysis:write"] as const;
+const PERSONAL_ANALYSIS_PLANS = ["pro", "premium"] as const;
 const EMAIL_VERIFICATION_TTL_MINUTES = 15;
 const NEWS_CHAT_OPTIONS = [
   { country: "IL", language: "he", name: "Israel news", languageName: "Hebrew", botUrl: "https://t.me/Israel_News_Ticker_Scanner_bot" },
@@ -244,6 +252,19 @@ const LANGUAGES = [
   ["ru", "Russian"],
   ["he", "Hebrew"]
 ];
+
+function logInternalAccessDiagnostic(request: Request, env: Env, matchedHandler: string): void {
+  const url = new URL(request.url);
+  console.log(JSON.stringify({
+    timestamp: new Date().toISOString(),
+    method: request.method,
+    pathname: url.pathname,
+    requestId: cleanString(request.headers.get("X-Request-Id")) ?? "",
+    keyId: cleanString(request.headers.get("X-Key-Id") ?? request.headers.get("X-Market-Signal-Key-Id")) ?? "",
+    deploymentVersionId: cleanString(env.CF_VERSION_METADATA?.id) ?? cleanString(env.ENVIRONMENT) ?? "unknown",
+    matchedHandler
+  }));
+}
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -303,6 +324,14 @@ export default {
         return withCors(request, await verifyEmailToken(request, env, ctx), env);
       }
 
+      if (url.pathname === "/api/session/bootstrap" && request.method === "POST") {
+        return withCors(request, await bootstrapSession(request, env, ctx), env);
+      }
+
+      if (url.pathname === "/api/session/csrf" && (request.method === "GET" || request.method === "POST")) {
+        return withCors(request, await refreshCsrfToken(request, env, ctx), env);
+      }
+
       if (url.pathname === "/api/settings" && request.method === "PUT") {
         return withCors(request, await updateSettings(request, env, ctx), env);
       }
@@ -327,6 +356,14 @@ export default {
         return withCors(request, await userSubscription(request, env), env);
       }
 
+      if (url.pathname === "/api/me/subscription/checkout" && request.method === "POST") {
+        return withCors(request, await createSubscriptionCheckout(request, env, ctx), env);
+      }
+
+      if (url.pathname === "/api/me/subscription/portal" && request.method === "POST") {
+        return withCors(request, await createSubscriptionPortal(request, env, ctx), env);
+      }
+
       if (url.pathname === "/api/me/api-keys" && request.method === "GET") {
         return withCors(request, await userApiKeys(request, env), env);
       }
@@ -345,6 +382,10 @@ export default {
 
       if (url.pathname === "/api/me/analysis-history" && request.method === "GET") {
         return withCors(request, await userAnalysisHistory(request, env), env);
+      }
+
+      if (url.pathname === "/api/me/analysis-requests" && request.method === "POST") {
+        return withCors(request, await createUserAnalysisRequest(request, env, ctx), env);
       }
 
       if (url.pathname === "/api/analysis/requests" && request.method === "POST") {
@@ -370,16 +411,30 @@ export default {
 
       if ((url.pathname === "/api/internal/access/check" || url.pathname === "/api/internal/access/check/") && request.method === "POST") {
         const rawBody = await request.text();
+        logInternalAccessDiagnostic(request, env, "internal_access_check.matched");
         const guard = await requireInternalAccess(request, env, rawBody, "scanner:access");
-        if (guard) return guard;
-        return await scannerAccessCheck(rawBody, env);
+        if (guard) {
+          logInternalAccessDiagnostic(request, env, "internal_access_check.hmac_rejected");
+          return guard;
+        }
+        logInternalAccessDiagnostic(request, env, "internal_access_check.hmac_validated");
+        const response = await scannerAccessCheck(rawBody, env);
+        logInternalAccessDiagnostic(request, env, "scannerAccessCheck");
+        return response;
       }
 
       if (url.pathname === "/api/internal/access/cache/commit" && request.method === "POST") {
         const rawBody = await request.text();
+        logInternalAccessDiagnostic(request, env, "internal_access_cache_commit.matched");
         const guard = await requireInternalAccess(request, env, rawBody, "scanner:cache");
-        if (guard) return guard;
-        return await commitScannerCache(rawBody, env);
+        if (guard) {
+          logInternalAccessDiagnostic(request, env, "internal_access_cache_commit.hmac_rejected");
+          return guard;
+        }
+        logInternalAccessDiagnostic(request, env, "internal_access_cache_commit.hmac_validated");
+        const response = await commitScannerCache(rawBody, env);
+        logInternalAccessDiagnostic(request, env, "commitScannerCache");
+        return response;
       }
 
       if (url.pathname === "/api/internal/deliver" && request.method === "POST") {
@@ -702,6 +757,83 @@ export async function verifyEmailToken(request: Request, env: Env, ctx: Executio
   return jsonWithHeaders({ verified: true, userId, plan: "beta", countryLinks, csrfToken: session.csrfToken }, { "Set-Cookie": session.cookie });
 }
 
+async function bootstrapSession(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const body = await readJson<Record<string, unknown>>(request);
+  const provider = cleanString(body.provider) ?? "telegram";
+  if (provider === "google") return json({ error: "google_oauth_not_configured" }, 501);
+  if (provider !== "telegram") return json({ error: "unsupported_identity_provider" }, 400);
+
+  const initData = cleanString(body.initData);
+  const telegramUser = initData ? await verifyTelegramInitData(initData, env) : null;
+  if (!telegramUser) return json({ error: "valid_telegram_init_data_required" }, 401);
+
+  const telegramUserId = String(telegramUser.id);
+  const existingSession = await optionalSession(request, env);
+  const telegramOwner = await findUser(env, { telegramUserId });
+  if (existingSession && telegramOwner && telegramOwner.id !== existingSession.user.id) {
+    return json({ error: "telegram_identity_already_linked" }, 409);
+  }
+
+  const userId = existingSession?.user.id ?? telegramOwner?.id ?? crypto.randomUUID();
+  const language = cleanLanguage(telegramUser.language_code, env.DEFAULT_LOCALE);
+  const displayName = [telegramUser.first_name, telegramUser.last_name].filter(Boolean).join(" ") || telegramUser.username || null;
+
+  if (existingSession?.user) {
+    await env.DB.prepare(
+      `UPDATE users
+       SET telegram_user_id = COALESCE(telegram_user_id, ?),
+           display_name = COALESCE(display_name, ?),
+           language = COALESCE(NULLIF(language, ''), ?),
+           updated_at = CURRENT_TIMESTAMP,
+           last_seen_at = CURRENT_TIMESTAMP
+       WHERE id = ?`
+    ).bind(telegramUserId, displayName, language, userId).run();
+  } else if (telegramOwner) {
+    await env.DB.prepare(
+      `UPDATE users
+       SET display_name = COALESCE(display_name, ?),
+           language = COALESCE(NULLIF(language, ''), ?),
+           status = 'active',
+           updated_at = CURRENT_TIMESTAMP,
+           last_seen_at = CURRENT_TIMESTAMP
+       WHERE id = ?`
+    ).bind(displayName, language, userId).run();
+  } else {
+    await env.DB.prepare(
+      `INSERT INTO users (id, telegram_user_id, display_name, language, country, status, last_seen_at)
+       VALUES (?, ?, ?, ?, ?, 'active', CURRENT_TIMESTAMP)`
+    ).bind(userId, telegramUserId, displayName, language, env.DEFAULT_COUNTRY).run();
+    await env.DB.prepare(
+      `INSERT INTO user_settings (user_id, language, country)
+       VALUES (?, ?, ?)
+       ON CONFLICT(user_id) DO UPDATE SET language = excluded.language, country = excluded.country, updated_at = CURRENT_TIMESTAMP`
+    ).bind(userId, language, env.DEFAULT_COUNTRY).run();
+  }
+
+  const session = await createUserSession(env, userId);
+  const user = await findUserById(env, userId);
+  const countryLinks = await listCountryLinks(env, userId);
+  ctx.waitUntil(audit(env, userId, "user", "session.bootstrap", request, { provider: "telegram" }));
+  return jsonWithHeaders({
+    user,
+    countryLinks,
+    identityProvider: "telegram",
+    csrfToken: session.csrfToken,
+    csrfTokenRequired: true
+  }, { "Set-Cookie": session.cookie });
+}
+
+async function refreshCsrfToken(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const auth = await requireSession(request, env);
+  if (auth instanceof Response) return auth;
+  const csrfToken = randomSecret(32);
+  await env.DB.prepare(
+    `UPDATE user_sessions SET csrf_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+  ).bind(await sha256(csrfToken), auth.sessionId).run();
+  ctx.waitUntil(audit(env, auth.user.id, "user", "session.csrf_refreshed", request, {}));
+  return json({ csrfToken, csrfTokenRequired: true });
+}
+
 async function optionalSession(request: Request, env: Env): Promise<AuthenticatedSession | null> {
   if (!cookieValue(request, SESSION_COOKIE_NAME)) return null;
   const session = await requireSession(request, env);
@@ -861,13 +993,24 @@ async function processSubscriptionEvent(request: Request, env: Env, ctx: Executi
     return json({ error: "verified_user_required", emailVerificationRequired: true }, 409);
   }
 
-  const subscriptionId = crypto.randomUUID();
-  await env.DB.prepare(
-    `INSERT INTO subscriptions (id, user_id, provider, external_id, plan, status, current_period_end, metadata_json)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-  ).bind(subscriptionId, userId, provider, externalId, plan, status, currentPeriodEnd, JSON.stringify(body.metadata ?? {})).run();
+  const existingSubscription = externalId ? await env.DB.prepare(
+    `SELECT id FROM subscriptions WHERE provider = ? AND external_id = ? LIMIT 1`
+  ).bind(provider, externalId).first<{ id: string }>() : null;
+  const subscriptionId = existingSubscription?.id ?? crypto.randomUUID();
+  if (existingSubscription) {
+    await env.DB.prepare(
+      `UPDATE subscriptions
+       SET user_id = ?, plan = ?, status = ?, current_period_end = ?, metadata_json = ?, updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?`
+    ).bind(userId, plan, status, currentPeriodEnd, JSON.stringify(body.metadata ?? {}), subscriptionId).run();
+  } else {
+    await env.DB.prepare(
+      `INSERT INTO subscriptions (id, user_id, provider, external_id, plan, status, current_period_end, metadata_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(subscriptionId, userId, provider, externalId, plan, status, currentPeriodEnd, JSON.stringify(body.metadata ?? {})).run();
+  }
 
-  ctx.waitUntil(audit(env, userId, provider, "subscription.received", request, { plan, status, externalId }));
+  ctx.waitUntil(audit(env, userId, provider, existingSubscription ? "subscription.replayed" : "subscription.received", request, { plan, status, externalId }));
 
   const user = await findUserById(env, userId);
   const countryLinks = await listCountryLinks(env, userId);
@@ -875,7 +1018,7 @@ async function processSubscriptionEvent(request: Request, env: Env, ctx: Executi
   const botUrl = countryLinks[0]?.botUrl ?? await findBotUrl(env, country);
   const access = await resolveAccess(env, userId, botUrl);
 
-  return json({ subscriptionId, userId, status, botUrl, countryLinks, access });
+  return json({ subscriptionId, replayed: Boolean(existingSubscription), userId, status, botUrl, countryLinks, access });
 }
 
 async function accountDetails(request: Request, env: Env): Promise<Response> {
@@ -1004,12 +1147,56 @@ async function userSubscription(request: Request, env: Env): Promise<Response> {
   ).bind(user.id).all();
 
   const current = await latestSubscription(env, user.id);
+  const latest = result.results[0] as { plan?: string; status?: string; current_period_end?: string | null } | undefined;
+  const plan = latest?.plan ?? null;
+  const status = latest?.status ?? current?.status ?? null;
+  const quota = await latestQuotaSummary(env, user.id);
+  const countryLinks = await listCountryLinks(env, user.id);
+  const subscriptionAllowed = isSubscriptionCurrentlyAllowed(current);
+  const privateAnalysisAllowed = Boolean(subscriptionAllowed && plan && PERSONAL_ANALYSIS_PLANS.includes(plan as typeof PERSONAL_ANALYSIS_PLANS[number]) && (!quota || quota.remainingCredits > 0));
   return json({
     userId: user.id,
     current,
-    allowed: isSubscriptionCurrentlyAllowed(current),
+    allowed: subscriptionAllowed,
+    summary: {
+      plan,
+      status,
+      currentPeriodEnd: current?.currentPeriodEnd ?? null,
+      renewalState: subscriptionRenewalState(status, current?.currentPeriodEnd ?? null),
+      canManageBilling: Boolean(env.SUBSCRIPTION_PORTAL_URL),
+      canStartCheckout: Boolean(env.SUBSCRIPTION_CHECKOUT_URL),
+      entitlements: {
+        channelAccess: subscriptionAllowed,
+        privateAnalysis: privateAnalysisAllowed,
+        apiAccess: privateAnalysisAllowed
+      },
+      quota,
+      channelLinks: countryLinks
+    },
     subscriptions: result.results
   });
+}
+
+async function createSubscriptionCheckout(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const auth = await requireSession(request, env);
+  if (auth instanceof Response) return auth;
+  const csrf = await requireCsrf(request, auth);
+  if (csrf) return csrf;
+  if (!env.SUBSCRIPTION_CHECKOUT_URL) return json({ error: "subscription_checkout_not_configured" }, 503);
+  const checkoutUrl = appendUrlParams(env.SUBSCRIPTION_CHECKOUT_URL, { userId: auth.user.id, email: auth.user.email ?? "" });
+  ctx.waitUntil(audit(env, auth.user.id, "user", "subscription.checkout.created", request, {}));
+  return json({ checkoutUrl });
+}
+
+async function createSubscriptionPortal(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const auth = await requireSession(request, env);
+  if (auth instanceof Response) return auth;
+  const csrf = await requireCsrf(request, auth);
+  if (csrf) return csrf;
+  if (!env.SUBSCRIPTION_PORTAL_URL) return json({ error: "subscription_portal_not_configured" }, 503);
+  const portalUrl = appendUrlParams(env.SUBSCRIPTION_PORTAL_URL, { userId: auth.user.id, email: auth.user.email ?? "" });
+  ctx.waitUntil(audit(env, auth.user.id, "user", "subscription.portal.created", request, {}));
+  return json({ portalUrl });
 }
 
 async function userApiKeys(request: Request, env: Env): Promise<Response> {
@@ -1083,6 +1270,10 @@ async function createApiAnalysisRequest(request: Request, env: Env, ctx: Executi
     return json({ error: "invalid_analysis_request" }, 400);
   }
   if (!reportType) return json({ error: "unsupported_report_type" }, 400);
+  const privateAccess = await privateAnalysisAccess(env, identity.userId);
+  if (!privateAccess.allowed) {
+    return json({ error: "private_analysis_access_denied", reason: privateAccess.reason }, 403);
+  }
 
   const quotaResponse = await scannerAccessCheck(JSON.stringify({
     contractVersion: "1.1",
@@ -1197,6 +1388,64 @@ async function userAnalysisHistory(request: Request, env: Env): Promise<Response
   const url = new URL(request.url);
   const limit = Math.min(Math.max(Number(url.searchParams.get("limit") ?? 25), 1), 100);
   return json({ userId: user.id, analysisHistory: await listAnalysisHistory(env, user.id, limit) });
+}
+
+async function createUserAnalysisRequest(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const auth = await requireSession(request, env);
+  if (auth instanceof Response) return auth;
+  const csrf = await requireCsrf(request, auth);
+  if (csrf) return csrf;
+
+  const body = await readJson<Record<string, unknown>>(request);
+  const requestId = cleanString(body.requestId) ?? crypto.randomUUID();
+  const ticker = cleanTicker(body.ticker);
+  const reportType = body.reportType === "fundrep" ? "fundrep" : body.reportType === undefined || body.reportType === "regular" ? "regular" : null;
+  const forceRefresh = body.forceRefresh === true;
+  const language = cleanInternalLanguage(body.language) || auth.user.language || "en";
+  if (!requestId || requestId.length > 128 || !ticker) return json({ error: "invalid_analysis_request" }, 400);
+  if (!reportType) return json({ error: "unsupported_report_type" }, 400);
+
+  const privateAccess = await privateAnalysisAccess(env, auth.user.id);
+  if (!privateAccess.allowed) {
+    return json({ error: "private_analysis_access_denied", reason: privateAccess.reason }, 403);
+  }
+
+  const quotaResponse = await scannerAccessCheck(JSON.stringify({
+    contractVersion: "1.1",
+    requestId,
+    userId: auth.user.id,
+    chatId: null,
+    ticker,
+    reportType,
+    generationVersion: cleanString(body.generationVersion) ?? "website-session-v1",
+    cacheStatus: "miss",
+    cacheCreatedAt: null,
+    cacheGenerationVersion: null,
+    forceRefresh,
+    language
+  }), env);
+  const quota = await quotaResponse.json<Record<string, unknown>>();
+  if (!quotaResponse.ok || quota.allowed !== true) {
+    return json({ error: "analysis_access_denied", ...quota }, quotaResponse.status >= 400 ? quotaResponse.status : 403);
+  }
+
+  await env.DB.prepare(
+    `INSERT INTO analysis_requests
+     (id, user_id, api_key_id, request_id, source, country, language, status, tickers_json, request_json, response_json)
+     VALUES (?, ?, NULL, ?, 'website_session', ?, ?, 'received', ?, ?, '{}')
+     ON CONFLICT(request_id) DO NOTHING`
+  ).bind(
+    crypto.randomUUID(),
+    auth.user.id,
+    requestId,
+    auth.user.country,
+    language,
+    JSON.stringify([ticker]),
+    JSON.stringify({ ticker, reportType, forceRefresh, language, channelType: "private" })
+  ).run();
+  await recordApiUsage(env, { userId: auth.user.id, endpoint: "analysis.requests.website" });
+  ctx.waitUntil(audit(env, auth.user.id, "user", "analysis_request.authorized", request, { requestId, ticker, reportType }));
+  return json({ requestId, status: "accepted", ticker, reportType, quota }, 202);
 }
 
 async function recordAnalysisRequest(request: Request, env: Env, ctx: ExecutionContext, rawBody?: string): Promise<Response> {
@@ -1412,12 +1661,13 @@ export async function internalDeliver(request: Request, rawBody: string, env: En
   } catch (error) {
     const known = error instanceof TelegramDeliveryError ? error : new TelegramDeliveryError("telegram_delivery_indeterminate", false);
     const status = known.retrySafe ? "failed" : "indeterminate";
+    const failureReason = known.detail ?? known.code;
     await env.DB.prepare(
       `UPDATE internal_deliveries SET status = ?, failure_reason = ?, updated_at = CURRENT_TIMESTAMP
        WHERE delivery_id = ? AND status = 'sending'`
-    ).bind(status, known.code, deliveryId).run();
-    ctx.waitUntil(audit(env, recipientType === "user" ? recipientId : null, "matcher", "delivery.failed", request, { deliveryId, reason: known.code, retryable: known.retrySafe }));
-    return json({ contractVersion: "1.0", requestId, deliveryId, status: "failed", telegramMessageId: null, reason: known.code, sentAt: null, retryable: known.retrySafe }, 503);
+    ).bind(status, failureReason, deliveryId).run();
+    ctx.waitUntil(audit(env, recipientType === "user" ? recipientId : null, "matcher", "delivery.failed", request, { deliveryId, reason: failureReason, retryable: known.retrySafe }));
+    return json({ contractVersion: "1.0", requestId, deliveryId, status: "failed", telegramMessageId: null, reason: failureReason, sentAt: null, retryable: known.retrySafe }, 503);
   }
 }
 
@@ -1494,7 +1744,7 @@ export async function scannerAccessCheck(rawBody: string, env: Env): Promise<Res
     if (existing.payload_hash !== payloadHash) {
       return scannerAccessResponse(requestId, false, 0, "rejected_no_access", existing.effective_cache_status, "none", creditsToUnits(existing.remaining_credits), "invalid_request", 400);
     }
-    return quotaDecisionResponseV11(existing, true);
+    return quotaDecisionResponseV11(existing);
   }
 
   const initialCacheStatus = payload.forceRefresh ? "bypass" : "miss";
@@ -1536,17 +1786,29 @@ export async function scannerAccessCheck(rawBody: string, env: Env): Promise<Res
     return scannerAccessResponse(requestId, false, 0, "rejected_no_access", initialCacheStatus, "none", null, "internal_access_unavailable", 503);
   }
 
-  const committedCache = payload.forceRefresh ? null : await env.DB.prepare(
+  const ownedCommittedCache = payload.forceRefresh ? null : await env.DB.prepare(
     `SELECT id FROM core_cache_entries
      WHERE user_id = ? AND ticker = ? AND report_type = ? AND generation_version = ? AND language = ?
        AND expires_at >= ?
      ORDER BY created_at DESC LIMIT 1`
   ).bind(userId, ticker, payload.reportType, generationVersion, language, new Date().toISOString()).first<{ id: string }>();
+  const sharedCommittedCache = payload.forceRefresh || ownedCommittedCache ? null : await env.DB.prepare(
+    `SELECT id FROM core_cache_entries
+     WHERE ticker = ? AND report_type = ? AND generation_version = ? AND language = ?
+       AND expires_at >= ?
+     ORDER BY created_at DESC LIMIT 1`
+  ).bind(ticker, payload.reportType, generationVersion, language, new Date().toISOString()).first<{ id: string }>();
+  const committedCache = ownedCommittedCache ?? sharedCommittedCache;
   const cacheStatus: "hit" | "miss" | "bypass" = payload.forceRefresh ? "bypass" : committedCache ? "hit" : "miss";
-  const scenario = quotaScenario(payload.reportType, cacheStatus);
+  const scenario = ownedCommittedCache
+    ? {
+        decision: payload.reportType === "fundrep" ? "own_repeat_fundrep" as const : "own_repeat" as const,
+        reportSource: "own_repeat" as const
+      }
+    : quotaScenario(payload.reportType, cacheStatus);
   const chargeCredits = payload.reportType === "fundrep"
-    ? (cacheStatus === "hit" ? policy.fundrep_cached_credits : policy.fundrep_new_credits)
-    : (cacheStatus === "hit" ? policy.regular_cached_credits : policy.regular_new_credits);
+    ? (ownedCommittedCache ? 0 : cacheStatus === "hit" ? policy.fundrep_cached_credits : policy.fundrep_new_credits)
+    : (ownedCommittedCache ? 0 : cacheStatus === "hit" ? policy.regular_cached_credits : policy.regular_new_credits);
   const receiptId = cacheStatus === "hit" ? null : crypto.randomUUID();
   const receiptCommitExpiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
   const quotaStatements = [
@@ -1560,11 +1822,13 @@ export async function scannerAccessCheck(rawBody: string, env: Env): Promise<Res
     env.DB.prepare(
       `INSERT OR IGNORE INTO quota_decisions_v11
        (request_id, ticker, payload_hash, user_id, subscription_id, chat_id, report_type, generation_version,
-        signed_cache_status, cache_created_at, cache_generation_version, force_refresh, language, effective_cache_status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        signed_cache_status, cache_created_at, cache_generation_version, force_refresh, language, effective_cache_status,
+        cache_entry_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).bind(
       requestId, ticker, payloadHash, userId, subscription!.id, chatId, payload.reportType, generationVersion,
-      payload.cacheStatus, cacheCreatedAt, cacheGenerationVersion, payload.forceRefresh ? 1 : 0, language, cacheStatus
+      payload.cacheStatus, cacheCreatedAt, cacheGenerationVersion, payload.forceRefresh ? 1 : 0, language, cacheStatus,
+      committedCache?.id ?? null
     ),
     env.DB.prepare(
       `UPDATE quota_decisions_v11
@@ -1588,9 +1852,9 @@ export async function scannerAccessCheck(rawBody: string, env: Env): Promise<Res
       `UPDATE quota_decisions_v11
        SET allowed = 1, charge_credits = ?, quota_decision = ?, report_source = ?,
            remaining_credits = (SELECT quota_limit_credits - used_credits FROM quota_balances WHERE subscription_id = ?),
-           reason = NULL, updated_at = CURRENT_TIMESTAMP
+           cache_entry_id = ?, reason = NULL, updated_at = CURRENT_TIMESTAMP
        WHERE request_id = ? AND ticker = ? AND payload_hash = ? AND quota_decision = 'approved_unsettled'`
-    ).bind(chargeCredits, scenario.decision, scenario.reportSource, subscription!.id, requestId, ticker, payloadHash),
+    ).bind(chargeCredits, scenario.decision, scenario.reportSource, subscription!.id, committedCache?.id ?? null, requestId, ticker, payloadHash),
     env.DB.prepare(
       `UPDATE quota_decisions_v11
        SET allowed = 0, charge_credits = 0, quota_decision = 'rejected_no_quota', report_source = 'none',
@@ -1626,7 +1890,7 @@ export async function scannerAccessCheck(rawBody: string, env: Env): Promise<Res
   if (!decision || decision.quota_decision === "pending" || decision.quota_decision === "approved_unsettled") {
     return scannerAccessResponse(requestId, false, 0, "rejected_no_access", cacheStatus, "none", null, "internal_access_unavailable", 503);
   }
-  return quotaDecisionResponseV11(decision, false);
+  return quotaDecisionResponseV11(decision);
 }
 
 async function persistRejectedQuotaDecisionV11(
@@ -1661,30 +1925,30 @@ async function persistRejectedQuotaDecisionV11(
     reason
   ).run();
   const decision = await findQuotaDecisionV11(env, payload.requestId, payload.ticker);
-  return decision ? quotaDecisionResponseV11(decision, false) : scannerAccessResponse(payload.requestId, false, 0, "rejected_no_access", cacheStatus, "none", null, "internal_access_unavailable", 503);
+  return decision ? quotaDecisionResponseV11(decision) : scannerAccessResponse(payload.requestId, false, 0, "rejected_no_access", cacheStatus, "none", null, "internal_access_unavailable", 503);
 }
 
 async function findQuotaDecisionV11(env: Env, requestId: string, ticker: string): Promise<QuotaDecisionRowV11 | null> {
   return env.DB.prepare(
     `SELECT request_id, ticker, payload_hash, report_type, allowed, charge_credits, quota_decision,
-            effective_cache_status, report_source, remaining_credits, cache_receipt_id, reason
+            effective_cache_status, report_source, remaining_credits, cache_receipt_id, cache_entry_id, reason
      FROM quota_decisions_v11 WHERE request_id = ? AND ticker = ?`
   ).bind(requestId, ticker).first<QuotaDecisionRowV11>();
 }
 
-function quotaDecisionResponseV11(row: QuotaDecisionRowV11, repeat: boolean): Response {
-  const ownRepeat = row.report_type === "fundrep" ? "own_repeat_fundrep" : "own_repeat";
+function quotaDecisionResponseV11(row: QuotaDecisionRowV11): Response {
   return scannerAccessResponse(
     row.request_id,
     Boolean(row.allowed),
-    repeat && row.allowed ? 0 : creditsToUnits(row.charge_credits) ?? 0,
-    repeat && row.allowed ? ownRepeat : row.quota_decision as QuotaDecisionV11,
+    creditsToUnits(row.charge_credits) ?? 0,
+    row.quota_decision as QuotaDecisionV11,
     row.effective_cache_status,
-    repeat && row.allowed ? "own_repeat" : row.report_source,
+    row.report_source,
     creditsToUnits(row.remaining_credits),
     row.reason,
     200,
-    row.cache_receipt_id
+    row.cache_receipt_id,
+    row.cache_entry_id
   );
 }
 
@@ -1714,9 +1978,10 @@ function scannerAccessResponse(
   remainingUnits: number | null,
   reason: string | null,
   status = 200,
-  cacheReceiptId: string | null = null
+  cacheReceiptId: string | null = null,
+  cacheEntryId: string | null = null
 ): Response {
-  return json({ contractVersion: "1.1", requestId, allowed, chargeUnits, quotaDecision, cacheStatus, reportSource, remainingUnits, reason, cacheReceiptId }, status);
+  return json({ contractVersion: "1.1", requestId, allowed, chargeUnits, quotaDecision, cacheStatus, reportSource, remainingUnits, reason, cacheReceiptId, cacheEntryId }, status);
 }
 
 export async function commitScannerCache(rawBody: string, env: Env): Promise<Response> {
@@ -1827,9 +2092,11 @@ async function telegramWebhook(request: Request, env: Env, ctx: ExecutionContext
   }
 
   const update = await readJson<TelegramUpdate>(request);
-  const chatId = update.message?.chat?.id;
-  const text = update.message?.text?.trim().toLowerCase();
-  if (!chatId || !text) return json({ ok: true });
+  const chat = update.message?.chat;
+  const chatId = chat?.id;
+  const rawText = update.message?.text?.trim();
+  const text = rawText?.toLowerCase();
+  if (!chatId || !text || !rawText) return json({ ok: true });
 
   if (text === "/start" || text === "/app") {
     const appUrl = buildPublicAppUrl(request);
@@ -1840,9 +2107,87 @@ async function telegramWebhook(request: Request, env: Env, ctx: ExecutionContext
         ]]
       }
     }));
+    return json({ ok: true });
   }
 
+  if (cleanString(chat?.type) !== "private") {
+    ctx.waitUntil(audit(env, null, "telegram", "private_analysis.rejected", request, { reason: "broadcast_channel_request_blocked", chatType: cleanString(chat?.type) ?? "unknown" }));
+    return json({ ok: true });
+  }
+
+  const ticker = cleanTicker(rawText);
+  if (!ticker) {
+    ctx.waitUntil(sendTelegramMessage(env, chatId, "Send one ticker symbol in this private chat to request premium analysis."));
+    return json({ ok: true });
+  }
+
+  await handlePrivateTelegramTickerRequest(request, env, ctx, String(update.message?.from?.id ?? chatId), chatId, ticker);
   return json({ ok: true });
+}
+
+async function handlePrivateTelegramTickerRequest(request: Request, env: Env, ctx: ExecutionContext, telegramUserId: string, chatId: string | number, ticker: string): Promise<void> {
+  const user = await findUser(env, { telegramUserId });
+  if (!user) {
+    ctx.waitUntil(sendTelegramMessage(env, chatId, "Open Market Signal AI first so this Telegram account can be connected."));
+    ctx.waitUntil(audit(env, null, "telegram", "private_analysis.rejected", request, { reason: "user_not_found" }));
+    return;
+  }
+
+  const access = await privateAnalysisAccess(env, user.id);
+  if (!access.allowed) {
+    ctx.waitUntil(sendTelegramMessage(env, chatId, privateAnalysisDenialText(access.reason)));
+    ctx.waitUntil(audit(env, user.id, "telegram", "private_analysis.rejected", request, { reason: access.reason, ticker }));
+    return;
+  }
+
+  const requestId = `tg_private_${crypto.randomUUID()}`;
+  await env.DB.prepare(
+    `INSERT INTO analysis_requests (id, user_id, request_id, source, country, language, status, tickers_json, request_json, response_json)
+     VALUES (?, ?, ?, 'telegram_private_bot', ?, ?, 'received', ?, ?, ?)`
+  ).bind(
+    crypto.randomUUID(),
+    user.id,
+    requestId,
+    user.country,
+    user.language,
+    JSON.stringify([ticker]),
+    JSON.stringify({ ticker, channelType: "private" }),
+    JSON.stringify({ status: "queued" })
+  ).run();
+  await recordApiUsage(env, { userId: user.id, endpoint: "telegram.private_analysis" });
+  ctx.waitUntil(sendTelegramMessage(env, chatId, `Premium analysis request received for ${ticker}.`));
+  ctx.waitUntil(audit(env, user.id, "telegram", "private_analysis.received", request, { requestId, ticker }));
+}
+
+async function privateAnalysisAccess(env: Env, userId: string): Promise<{ allowed: boolean; reason: string | null }> {
+  const subscription = await env.DB.prepare(
+    `SELECT id, plan, status, current_period_end
+     FROM subscriptions
+     WHERE user_id = ?
+     ORDER BY created_at DESC
+     LIMIT 1`
+  ).bind(userId).first<{ id: string; plan: string; status: string; current_period_end: string | null }>();
+  const normalized = subscription ? { status: subscription.status, currentPeriodEnd: subscription.current_period_end } : null;
+  if (!isSubscriptionCurrentlyAllowed(normalized)) return { allowed: false, reason: subscriptionAccessReason(normalized) };
+  if (!PERSONAL_ANALYSIS_PLANS.includes(subscription!.plan as typeof PERSONAL_ANALYSIS_PLANS[number])) {
+    return { allowed: false, reason: "premium_plan_required" };
+  }
+  const balance = await env.DB.prepare(
+    `SELECT quota_limit_credits, used_credits
+     FROM quota_balances
+     WHERE user_id = ?
+     ORDER BY updated_at DESC
+     LIMIT 1`
+  ).bind(userId).first<{ quota_limit_credits: number; used_credits: number }>();
+  if (balance && balance.used_credits >= balance.quota_limit_credits) return { allowed: false, reason: "quota_exceeded" };
+  return { allowed: true, reason: null };
+}
+
+function privateAnalysisDenialText(reason: string | null): string {
+  if (reason === "premium_plan_required") return "Private ticker analysis is available on a premium plan.";
+  if (reason === "quota_exceeded") return "Your analysis quota is used up for this period.";
+  if (reason === "subscription_period_expired") return "Your subscription period has ended. Please renew to request private analysis.";
+  return "An active subscription is required to request private ticker analysis.";
 }
 
 async function setupTelegramWebApp(request: Request, env: Env): Promise<Response> {
@@ -2445,6 +2790,22 @@ async function findCountryLink(env: Env, userId: string, country: string): Promi
   return row ? { country: row.country, botUrl: row.bot_url, isActive: Boolean(row.is_active) } : null;
 }
 
+async function latestQuotaSummary(env: Env, userId: string): Promise<{ limitCredits: number; usedCredits: number; remainingCredits: number } | null> {
+  const row = await env.DB.prepare(
+    `SELECT quota_limit_credits, used_credits
+     FROM quota_balances
+     WHERE user_id = ?
+     ORDER BY updated_at DESC
+     LIMIT 1`
+  ).bind(userId).first<{ quota_limit_credits: number; used_credits: number }>();
+  if (!row) return null;
+  return {
+    limitCredits: row.quota_limit_credits,
+    usedCredits: row.used_credits,
+    remainingCredits: Math.max(0, row.quota_limit_credits - row.used_credits)
+  };
+}
+
 async function latestSubscription(env: Env, userId: string): Promise<{ status: string; currentPeriodEnd: string | null } | null> {
   const row = await env.DB.prepare(
     `SELECT status, current_period_end
@@ -2454,6 +2815,23 @@ async function latestSubscription(env: Env, userId: string): Promise<{ status: s
      LIMIT 1`
   ).bind(userId).first<{ status: string; current_period_end: string | null }>();
   return row ? { status: row.status, currentPeriodEnd: row.current_period_end } : null;
+}
+
+function subscriptionRenewalState(status: string | null, currentPeriodEnd: string | null): "none" | "renews" | "past_due" | "canceled" | "expired" {
+  if (!status) return "none";
+  if (status === "past_due") return "past_due";
+  if (status === "canceled") return "canceled";
+  if (status === "expired") return "expired";
+  if (currentPeriodEnd && Date.parse(currentPeriodEnd) <= Date.now()) return "expired";
+  return ACTIVE_SUBSCRIPTION_STATUSES.includes(status as typeof ACTIVE_SUBSCRIPTION_STATUSES[number]) ? "renews" : "none";
+}
+
+function appendUrlParams(url: string, params: Record<string, string>): string {
+  const parsed = new URL(url);
+  for (const [key, value] of Object.entries(params)) {
+    if (value) parsed.searchParams.set(key, value);
+  }
+  return parsed.toString();
 }
 
 export function isSubscriptionCurrentlyAllowed(subscription: { status: string; currentPeriodEnd: string | null } | null, now = new Date()): boolean {
@@ -2644,7 +3022,7 @@ async function sendTelegramMessage(env: Env, chatId: string | number, text: stri
 }
 
 class TelegramDeliveryError extends Error {
-  constructor(public readonly code: string, public readonly retrySafe: boolean) {
+  constructor(public readonly code: string, public readonly retrySafe: boolean, public readonly detail: string | null = null) {
     super(code);
   }
 }
@@ -2667,7 +3045,9 @@ async function sendDeliveryTelegramMessage(env: Env, chatId: string, text: strin
   } catch {
     throw new TelegramDeliveryError("telegram_delivery_indeterminate", false);
   }
-  if (!response.ok || !isTelegramOk(data)) throw new TelegramDeliveryError("telegram_delivery_rejected", true);
+  if (!response.ok || !isTelegramOk(data)) {
+    throw new TelegramDeliveryError("telegram_delivery_rejected", true, telegramFailureDetail(response.status, data));
+  }
   const messageId = isRecord(data.result) ? data.result.message_id : null;
   if (typeof messageId !== "number" && typeof messageId !== "string") {
     throw new TelegramDeliveryError("telegram_delivery_indeterminate", false);
@@ -2692,6 +3072,20 @@ async function telegramApi(env: Env, method: string, payload: Record<string, unk
 
 function isTelegramOk(value: unknown): value is { ok: true; result?: unknown } {
   return typeof value === "object" && value !== null && (value as { ok?: unknown }).ok === true;
+}
+
+function telegramFailureDetail(status: number, data: unknown): string {
+  const errorCode = isRecord(data) && typeof data.error_code === "number" ? data.error_code : status;
+  const description = isRecord(data) && typeof data.description === "string" ? data.description : "telegram_request_failed";
+  return `telegram_delivery_rejected:${errorCode}:${sanitizeTelegramErrorDescription(description)}`;
+}
+
+function sanitizeTelegramErrorDescription(description: string): string {
+  return description
+    .replace(/bot\d+:[A-Za-z0-9_-]+/g, "bot[redacted]")
+    .replace(/@[A-Za-z][A-Za-z0-9_]{4,31}/g, "@[redacted]")
+    .replace(/-?\d{8,}/g, "[redacted-number]")
+    .slice(0, 180);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -2803,6 +3197,12 @@ function cleanString(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const cleaned = value.trim();
   return cleaned.length > 0 && cleaned.length <= 512 ? cleaned : null;
+}
+
+function cleanTicker(value: unknown): string | null {
+  const cleaned = cleanString(value)?.toUpperCase().replace(/^\$/, "");
+  if (!cleaned || !/^[A-Z0-9][A-Z0-9._:-]{0,15}$/.test(cleaned)) return null;
+  return cleaned;
 }
 
 export function parseFutureIsoTimestamp(value: unknown): { ok: true; value: string | null } | { ok: false } {
@@ -2996,7 +3396,7 @@ function renderLanding(): string {
       <div class="hero-copy">
         <p class="eyebrow">Commercial market intelligence SaaS</p>
         <h1>Market Signal AI</h1>
-        <p class="hero-text">News-aware ticker analysis, country feeds, Telegram delivery, API access, and operator monitoring in one subscription product.</p>
+        <p class="hero-text">Read-only country news channels, private premium ticker analysis, API access, and operator monitoring in one subscription product.</p>
         <div class="hero-actions">
           <a class="primary-action" href="/signup">Start trial</a>
           <a class="secondary-action" href="/dashboard">View dashboard</a>
@@ -3013,8 +3413,8 @@ function renderLanding(): string {
       </div>
     </section>
     <section class="feature-grid">
-      ${feature("Signal workflow", "Convert news into ticker watchlists, country routes, and report history.")}
-      ${feature("Subscriber access", "Gate Telegram channels, API keys, and country bots behind active plans.")}
+      ${feature("Broadcast workflow", "Publish matched market news into read-only country and language channels.")}
+      ${feature("Private analysis", "Keep user-requested ticker analysis private through website, API, or the premium bot.")}
       ${feature("Admin monitoring", "Track users, subscriptions, events, bot routes, and operational health.")}
     </section>
   </main>`;
@@ -3022,10 +3422,10 @@ function renderLanding(): string {
 
 function renderPricing(): string {
   return `<main class="saas-shell page-stack">
-    <section class="page-heading"><p class="eyebrow">Pricing</p><h1>Plans for signal teams</h1><p>Start with Telegram delivery, then add API access and deeper report automation as volume grows.</p></section>
+    <section class="page-heading"><p class="eyebrow">Pricing</p><h1>Plans for signal teams</h1><p>Start with read-only country channels, then add private ticker analysis, API access, and report automation as volume grows.</p></section>
     <section class="pricing-grid">
-      ${plan("Starter", "$29", ["2 country feeds", "Telegram WebApp account control", "Ticker report history"], "Start trial")}
-      ${plan("Pro", "$79", ["10 country feeds", "API key access", "Priority ticker analysis", "Billing controls"], "Choose Pro", true)}
+      ${plan("Starter", "$29", ["2 read-only country feeds", "Telegram WebApp account control", "Report history"], "Start trial")}
+      ${plan("Pro", "$79", ["10 read-only feeds", "Private ticker analysis quota", "API key access", "Billing controls"], "Choose Pro", true)}
       ${plan("Desk", "Custom", ["Multiple operators", "Admin monitoring", "Webhook integrations", "Custom bot routes"], "Contact sales")}
     </section>
   </main>`;
@@ -3047,9 +3447,9 @@ function renderOnboarding(): string {
   return `<main class="app-layout">${appSidebar("onboarding")}<section class="workspace">
     <div class="page-heading compact"><p class="eyebrow">Onboarding</p><h1>Set up your signal workspace</h1></div>
     <div class="step-grid">
-      ${step("1", "Choose markets", "Pick countries, languages, and delivery channels.")}
-      ${step("2", "Connect Telegram", "Use Telegram as fast entry, not the main product surface.")}
-      ${step("3", "Activate plan", "Unlock reports, API access, and bot routes.")}
+      ${step("1", "Choose markets", "Pick read-only country and language channels.")}
+      ${step("2", "Connect Telegram", "Join broadcasts and start the private bot if your plan allows it.")}
+      ${step("3", "Activate plan", "Unlock private analysis, API access, and report history.")}
     </div>
     <section class="panel form-surface">
       <label>Workspace name<input value="Market Desk"></label>
@@ -3061,15 +3461,15 @@ function renderOnboarding(): string {
 
 function renderDashboard(): string {
   return `<main class="app-layout">${appSidebar("dashboard")}<section class="workspace">
-    <div class="workspace-head"><div><p class="eyebrow">Dashboard</p><h1>Today's market signal board</h1></div><a class="primary-action" href="/ticker">Analyze ticker</a></div>
+    <div class="workspace-head"><div><p class="eyebrow">Dashboard</p><h1>Today's market signal board</h1></div><a class="primary-action" href="/ticker">Analyze ticker privately</a></div>
     <section class="metrics product-metrics">
-      ${metricCard("Active feeds", "2", "Israel, US")}
+      ${metricCard("Read-only feeds", "2", "Israel, US")}
       ${metricCard("Reports generated", "128", "+18 this week")}
       ${metricCard("API calls", "14.2k", "72% quota")}
       ${metricCard("Telegram users", "341", "active subscribers")}
     </section>
     <section class="dashboard-grid">
-      <div class="panel"><h2>Signal queue</h2>${signalRows()}</div>
+      <div class="panel"><h2>Broadcast queue</h2>${signalRows()}</div>
       <div class="panel"><h2>News heat</h2><div class="heat-list"><span style="width:88%">AI infrastructure</span><span style="width:64%">Central banks</span><span style="width:52%">Energy policy</span></div></div>
     </section>
   </section></main>`;
@@ -3077,12 +3477,12 @@ function renderDashboard(): string {
 
 function renderChannels(): string {
   return `<main class="app-layout">${appSidebar("channels")}<section class="workspace">
-    <div class="page-heading compact"><p class="eyebrow">Countries, languages, channels</p><h1>Route signals by market</h1></div>
+    <div class="page-heading compact"><p class="eyebrow">Countries, languages, channels</p><h1>Manage read-only market channels</h1><p>Country channels are broadcast-only. Personal ticker requests belong in the private bot, website, or API.</p></div>
     <section class="channel-grid">
-      ${channel("Israel", "Hebrew", "Telegram + API", "Active")}
-      ${channel("United States", "Russian", "Telegram + API", "Active")}
-      ${channel("United Kingdom", "English", "API only", "Draft")}
-      ${channel("Germany", "German", "Telegram pending", "Planned")}
+      ${channel("Israel", "Hebrew", "Read-only Telegram channel", "Active")}
+      ${channel("United States", "Russian", "Read-only Telegram channel", "Active")}
+      ${channel("United Kingdom", "English", "Website feed", "Draft")}
+      ${channel("Germany", "German", "Telegram channel pending", "Planned")}
     </section>
   </section></main>`;
 }
@@ -3101,7 +3501,7 @@ Authorization: Bearer &lt;INTERNAL_API_SECRET&gt;</pre>
 
 function renderTickerAnalysis(): string {
   return `<main class="app-layout">${appSidebar("ticker")}<section class="workspace">
-    <div class="workspace-head"><div><p class="eyebrow">Ticker analysis</p><h1>Analyze a ticker with news context</h1></div></div>
+    <div class="workspace-head"><div><p class="eyebrow">Private ticker analysis</p><h1>Analyze a ticker privately with news context</h1><p>Results are delivered only to your account, API integration, or private Telegram bot. They are not posted to country channels.</p></div></div>
     <section class="panel ticker-search"><input value="NVDA"><button type="button">Run analysis</button></section>
     <section class="analysis-grid">
       <div class="panel"><h2>Signal summary</h2><p class="score">Bullish 85</p><p>Strong news momentum, elevated valuation risk, and positive supplier sentiment.</p></div>

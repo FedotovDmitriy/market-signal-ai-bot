@@ -2,7 +2,7 @@
 
 Status: ready for product/design/QA use.
 Owner: Oleg.
-Last updated: 2026-06-23.
+Last updated: 2026-07-09.
 
 This list is for marketing, UI, Telegram, reports, API docs, and sales copy. It reduces the risk that Market Signal AI is perceived as licensed personalized investment advice or as promising investment outcomes.
 
@@ -43,6 +43,10 @@ Do not use these in public product copy, generated reports, Telegram messages, p
 - assured outcome
 - guaranteed alpha
 - guaranteed win rate
+- private recommendation
+- premium investment advice
+- exclusive buy alert
+- private buy/sell advice
 
 ## High-Risk Phrases Requiring Legal Review
 
@@ -67,6 +71,8 @@ Do not use these without Oleg and local counsel review:
 - professional investment advice
 - advisor-grade
 - institutional-grade recommendations
+- private signal for you
+- premium recommendation for your portfolio
 
 ## Safer Alternatives
 
@@ -82,6 +88,9 @@ Use these instead:
 - model output
 - confidence score
 - watchlist context
+- read-only broadcast feed
+- private delivery
+- premium private analysis
 - momentum conditions
 - downside risk
 - upside scenario
@@ -129,9 +138,10 @@ Safer:
 - Landing, pricing, signup, dashboard, ticker page, API docs, reports, and Telegram text contain no hard-banned phrases.
 - Generated report templates do not instruct the user to buy, sell, hold, enter, exit, or short.
 - Signal-like terms are paired with informational disclaimer text.
+- Read-only channel copy does not invite users to submit personal ticker requests in broadcast channels.
+- Private analysis copy does not imply suitability, personalization, or advice based on the user's circumstances.
 - Any performance, return, target price, or win-rate claim is blocked until management and legal approve evidence and wording.
 
 ## Escalation Rule
 
 Escalate to manager immediately if product, sales, or marketing asks to use hard-banned language or claims that Market Signal AI can guarantee outcomes.
-
