@@ -1,6 +1,6 @@
 # Cloudflare Release And Rollback Runbook
 
-Updated: 2026-06-30
+Updated: 2026-07-15
 
 Owner: Max, DevOps / Cloudflare
 
@@ -15,12 +15,29 @@ Production is deployed only through the manual GitHub Actions production job and
 
 ## HMAC Keyring
 
-Core reads `INTERNAL_API_SECRETS_JSON`. Each caller has a distinct key ID and secret.
+Core reads `INTERNAL_API_SECRETS_JSON` and split secret bindings named from the key ID, for example `INTERNAL_API_SECRET_SCANNER_PROD_V1`. Each caller has a distinct key ID and secret.
 
-| Environment | Scanner key ID | Matcher key ID | State |
-| --- | --- | --- | --- |
-| dev | `scanner-dev-v1` | `matcher-dev-v1` | Core keyring created on 2026-06-30 |
-| production | `scanner-prod-v1` | `matcher-prod-v1` | Not created; production approval required |
+| Environment | Scanner key ID | Matcher key ID | Website key ID | State |
+| --- | --- | --- | --- | --- |
+| dev | `scanner-dev-v2` | `matcher-dev-v1` | `website-dev-v1` | Active in Core dev |
+| production | `scanner-prod-v1` | `matcher-prod-v1` | `website-prod-v1` | Reserved; not created until production approval |
+
+Required production scope map after approval:
+
+```json
+{
+  "scanner-prod-v1": ["scanner:access", "scanner:cache", "scanner:history"],
+  "matcher-prod-v1": ["matcher:access", "matcher:deliver"],
+  "website-prod-v1": ["website:subscriptions"]
+}
+```
+
+Preferred production split secret bindings after approval:
+
+- `INTERNAL_API_SECRET_SCANNER_PROD_V1`
+- `INTERNAL_API_SECRET_MATCHER_PROD_V1`
+- `INTERNAL_API_SECRET_WEBSITE_PROD_V1`
+- `INTERNAL_API_SCOPES_JSON`
 
 Secret values must be generated with a cryptographic RNG and transferred directly to the matching caller secret store. Never put values in Git, D1, logs, CI output, documentation, or chat.
 
@@ -32,7 +49,7 @@ Rotation order:
 4. Confirm successful Core response and replay rejection.
 5. Remove the old key from the Core keyring after the overlap window.
 
-Current integration blocker: deployed scanner and matcher code still sends legacy Bearer authorization. Production HMAC secrets must not be enabled as a release signal until both callers send `X-Key-Id`, unique `X-Request-Id`, `X-Timestamp`, and `X-Signature` using the Core canonical request format.
+Current production blocker: production Core still has only legacy `INTERNAL_API_SECRET` and does not have `INTERNAL_API_SCOPES_JSON` or production split HMAC secrets. Production HMAC secrets must not be enabled as a release signal until scanner, matcher, and website caller owners confirm the matching production key IDs and caller-side secret stores.
 
 ## Production 404 Finding
 
@@ -44,7 +61,7 @@ Observed on 2026-06-30:
 - Active production deployment: `542a4d29-49da-4632-a67a-48c6f76df0fa`.
 - Active production Worker version: `967192f3-12cc-4176-8dc5-ceb0b0d21ae7`, version 34, deployed 2026-06-22.
 
-Cause: production serves an older Worker bundle that does not include the local `scannerAccessCheck` route. Production D1 also has migrations `0007` through `0012` pending. This is version drift, not a total Worker or D1 outage.
+Cause: production serves an older Worker bundle that does not include the local `scannerAccessCheck` route. As of 2026-07-15, production D1 also has migrations `0007` through `0016` pending. This is version drift, not a total Worker or D1 outage.
 
 ## Dev Deployment
 
@@ -64,7 +81,7 @@ All conditions are mandatory:
 1. Main manager records shared production approval.
 2. Security owner approves the HMAC-only implementation.
 3. Scanner and matcher dev integration tests pass with separate keys.
-4. CI typecheck, 40 tests, and both Wrangler dry-runs pass.
+4. CI typecheck, 72 tests, and Wrangler production dry-run pass.
 5. GitHub Environment `production` has required reviewers.
 6. Current deployment and version IDs are recorded.
 7. Production D1 export completes and its checksum is recorded.
@@ -75,23 +92,31 @@ Backup captured before the pending migrations:
 - Size: `15461` bytes
 - SHA-256: `374F90C6CEC6E7590904D0F2ACD4A05337A29C2920BEA6BB5EA7EE1301C9D8F9`
 
+Fresh gate backup captured on 2026-07-15 before `0007` through `0016`:
+
+- Local protected path: `.wrangler/backups/market-signal-ai-bot-db-production-20260715-205848.sql`
+- Size: `15461` bytes
+- SHA-256: `374f90c6cec6e7590904d0f2acd4a05337a29c2920bea6bb5ea7ee1301c9d8f9`
+
 The `.wrangler/` directory is ignored by Git. CI also exports a fresh backup immediately before a production migration and retains the protected artifact for three days.
 
 ## Production Deployment Order
 
 Run only after all production approvals:
 
-1. Create independent `scanner-prod-v1` and `matcher-prod-v1` values and synchronize them with the corresponding caller secret stores.
-2. Upload the production Core keyring without removing the old key during the transition window.
+1. Create independent `scanner-prod-v1`, `matcher-prod-v1`, and `website-prod-v1` values and synchronize them with the corresponding caller secret stores.
+2. Upload the production Core split secrets and `INTERNAL_API_SCOPES_JSON`; do not remove legacy `INTERNAL_API_SECRET` during the transition window.
 3. Record `wrangler deployments status --env production --json`.
 4. Export a fresh D1 backup and record its SHA-256 checksum.
-5. Confirm the pending list is exactly `0007` through `0012`.
+5. Confirm the pending list is exactly `0007` through `0016`.
 6. Apply production D1 migrations.
 7. Deploy the production Worker through the protected GitHub job.
 8. Verify `/api/health` and the `environment=production` marker.
-9. Run one valid signed scanner request and one valid signed matcher request.
-10. Verify an unsigned request, stale timestamp, wrong key ID, invalid signature, and replayed request ID all fail closed.
-11. Monitor Worker 5xx, D1 errors, internal access failures, scanner failures, queue depth, and DLQ for at least 30 minutes.
+9. Verify unsigned `POST /api/internal/access/check` and `POST /api/internal/access/cache/commit` return `401`, not `404`.
+10. Run one valid signed scanner request and one valid signed matcher request.
+11. Verify `cache/commit` with a Core-issued receipt returns the expected contract response.
+12. Verify stale timestamp, wrong key ID, invalid signature, missing scope, and replayed request ID all fail closed.
+13. Monitor Worker 5xx, D1 errors, internal access failures, scanner failures, queue depth, and DLQ for at least 30 minutes.
 
 ## Rollback
 

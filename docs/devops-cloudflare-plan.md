@@ -141,7 +141,7 @@ v0.1 required secrets per environment:
 | --- | --- | --- | --- | --- |
 | `ADMIN_TOKEN` | yes | yes | yes | Unique per env; rotate before launch. |
 | `ADMIN_USERNAME` | optional | yes | yes | Non-secret value may be `vars` if acceptable. |
-| `INTERNAL_API_SECRET` | yes | yes | yes | Unique per env; used by `/api/internal/access`. |
+| `INTERNAL_API_SECRET` | legacy transition only | legacy transition only | legacy transition only | Use identified HMAC key IDs, split secrets or `INTERNAL_API_SECRETS_JSON`, and `INTERNAL_API_SCOPES_JSON` for internal routes. Bearer is not accepted. |
 | `SUBSCRIPTION_WEBHOOK_SECRET` | yes | yes | yes | Replace when payment provider is selected. |
 | `TELEGRAM_WEBHOOK_SECRET` | yes | yes | yes | Unique per bot/env. |
 | `TELEGRAM_BOT_TOKEN` | test only | staging bot | production bot | Raw token must never appear in logs or payloads. |

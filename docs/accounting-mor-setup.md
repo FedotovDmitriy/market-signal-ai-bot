@@ -10,6 +10,8 @@ This document defines the MVP accounting setup for Market Signal AI subscription
 
 It is a working accounting checklist, not a signed CPA tax memo. A licensed CPA/bookkeeper must approve the final chart of accounts, revenue recognition policy, tax treatment and closing process before the first paid subscription.
 
+Operational readiness details for production gate are tracked in `docs/accounting-paddle-mor-readiness.md`.
+
 ## Assumptions
 
 - First paid launch uses Paddle as Merchant of Record.
@@ -224,5 +226,6 @@ Paid launch should remain blocked until:
 
 - Paddle API transactions: https://developer.paddle.com/api-reference/transactions/list-transactions
 - Paddle API reports: https://developer.paddle.com/api-reference/reports/list-reports
+- Paddle MoR accounting readiness: `docs/accounting-paddle-mor-readiness.md`
 - Natalia local counsel/accountant review: `docs/legal/reports/task-09-local-counsel-accountant-questions.md`
 - Marina jurisdiction/payment memo: `docs/legal/reports/task-08-business-jurisdiction-payment-report.md`

@@ -19,7 +19,7 @@ Use this checklist before a production launch or major release.
 ## market-signal-ai-bot
 
 - `ALLOW_UNVERIFIED_TELEGRAM=false`.
-- `INTERNAL_API_SECRET` is set.
+- Internal HMAC key IDs, scoped split secrets or `INTERNAL_API_SECRETS_JSON`, and `INTERNAL_API_SCOPES_JSON` are set; internal Bearer examples are not used.
 - `SUBSCRIPTION_WEBHOOK_SECRET` is set.
 - `TELEGRAM_WEBHOOK_SECRET` is set.
 - `ADMIN_TOKEN` is set and recently rotated.

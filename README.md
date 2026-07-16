@@ -72,7 +72,7 @@ Optional public checkout URL in `wrangler.jsonc`:
 "SUBSCRIPTION_CHECKOUT_URL": "https://your-site.example/checkout"
 ```
 
-When this value is configured, the Telegram WebApp can send a newly registered user to your subscription checkout with `userId` appended to the URL.
+When this value is configured, authenticated user-session flows can request a checkout URL through `/api/me/subscription/checkout`. Browser code must not call internal HMAC subscription routes directly.
 
 Optional CORS allowlist in `wrangler.jsonc`:
 
@@ -184,7 +184,7 @@ Send subscription events with an HMAC signature. The signature payload is:
 <unix_timestamp_seconds>.<raw_json_body>
 ```
 
-Sign it with `SUBSCRIPTION_WEBHOOK_SECRET` using HMAC-SHA256 and send:
+Sign it with `SUBSCRIPTION_WEBHOOK_SECRET` using HMAC-SHA256 and send. This legacy route is for trusted subscription intake only; browser code must not call it directly.
 
 ```http
 POST /api/subscriptions
@@ -228,7 +228,7 @@ Internal signing canonical value:
 <timestamp>.<key_id>.<request_id>.<method>.<pathname>.<canonical_query>.<sha256_raw_body>
 ```
 
-Use `INTERNAL_API_SECRETS_JSON` as a secret JSON object for key rotation, for example `{"scanner-v1":"<32+ byte secret>","matcher-v1":"<different 32+ byte secret>"}`. A single caller can also be added without rewriting the shared keyring by setting a split secret named `INTERNAL_API_SECRET_<KEY_ID_NORMALIZED>`, for example `matcher-dev-v1` reads `INTERNAL_API_SECRET_MATCHER_DEV_V1` and `website-dev-v1` reads `INTERNAL_API_SECRET_WEBSITE_DEV_V1`. Configure a separate mandatory `INTERNAL_API_SCOPES_JSON`, for example `{"scanner-v1":["scanner:access","scanner:cache","scanner:history"],"matcher-v1":["matcher:access","matcher:deliver"],"website-dev-v1":["website:subscriptions"]}`. A valid signature never grants permissions absent from this explicit map, and scope rejection happens before nonce consumption. The legacy single `INTERNAL_API_SECRET` works only when `INTERNAL_API_KEY_ID` identifies it; Bearer authentication is not accepted.
+Use `INTERNAL_API_SECRETS_JSON` as a secret JSON object for key rotation, for example `{"scanner-v1":"<32+ byte secret>","matcher-v1":"<different 32+ byte secret>"}`. A single caller can also be added without rewriting the shared keyring by setting a split secret named `INTERNAL_API_SECRET_<KEY_ID_NORMALIZED>`, for example `matcher-dev-v1` reads `INTERNAL_API_SECRET_MATCHER_DEV_V1` and `website-dev-v1` reads `INTERNAL_API_SECRET_WEBSITE_DEV_V1`. Configure a separate mandatory `INTERNAL_API_SCOPES_JSON`, for example `{"scanner-v1":["scanner:access","scanner:cache","scanner:history"],"matcher-v1":["matcher:access","matcher:deliver"],"website-dev-v1":["website:subscriptions"]}`. A valid signature never grants permissions absent from this explicit map, and scope rejection happens before nonce consumption. The legacy single `INTERNAL_API_SECRET` works only when `INTERNAL_API_KEY_ID` identifies it; Bearer authentication is not accepted for internal service routes.
 
 Email verification uses the Cloudflare Email Service `EMAIL` binding. Enable a sender domain, set `EMAIL_FROM` to an address on that domain, and set a separate random `EMAIL_VERIFICATION_SECRET` of at least 32 bytes. Raw verification tokens are sent by email once and are never stored in D1.
 

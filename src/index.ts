@@ -3356,7 +3356,7 @@ function renderSaasPage(env: Env, page: SaasPage): string {
       <a href="/ticker">Ticker analysis</a>
       <a href="/api-access">API</a>
       <a href="/telegram">Telegram entry</a>
-      <a class="nav-cta" href="/signup">Start trial</a>
+      <a class="nav-cta" href="/signup">Start research trial</a>
     </nav>
   </header>
   ${page === "landing" ? renderLanding() : ""}
@@ -3398,7 +3398,7 @@ function renderLanding(): string {
         <h1>Market Signal AI</h1>
         <p class="hero-text">Read-only country news channels, private premium ticker analysis, API access, and operator monitoring in one subscription product.</p>
         <div class="hero-actions">
-          <a class="primary-action" href="/signup">Start trial</a>
+          <a class="primary-action" href="/signup">Start research trial</a>
           <a class="secondary-action" href="/dashboard">View dashboard</a>
         </div>
       </div>
@@ -3422,18 +3422,23 @@ function renderLanding(): string {
 
 function renderPricing(): string {
   return `<main class="saas-shell page-stack">
-    <section class="page-heading"><p class="eyebrow">Pricing</p><h1>Plans for signal teams</h1><p>Start with read-only country channels, then add private ticker analysis, API access, and report automation as volume grows.</p></section>
+    <section class="page-heading"><p class="eyebrow">Pricing</p><h1>Plans for market research teams</h1><p>Start with read-only country channels, then add private informational ticker analysis, API access, and report automation as volume grows. Subscription access does not include investment advice or guaranteed outcomes.</p></section>
     <section class="pricing-grid">
-      ${plan("Starter", "$29", ["2 read-only country feeds", "Telegram WebApp account control", "Report history"], "Start trial")}
+      ${plan("Starter", "$29", ["2 read-only country feeds", "Telegram WebApp account control", "Report history", "Informational analytics only"], "Start research trial")}
       ${plan("Pro", "$79", ["10 read-only feeds", "Private ticker analysis quota", "API key access", "Billing controls"], "Choose Pro", true)}
       ${plan("Desk", "Custom", ["Multiple operators", "Admin monitoring", "Webhook integrations", "Custom bot routes"], "Contact sales")}
+    </section>
+    <section class="legal-strip">
+      <strong>Before checkout</strong>
+      <p>Your subscription renews automatically until canceled. Market Signal AI provides informational market research only, not investment advice or guaranteed outcomes.</p>
+      <label class="consent-line"><input type="checkbox"> I understand that Market Signal AI is not investment advice and that subscriptions renew automatically until canceled.</label>
     </section>
   </main>`;
 }
 
 function renderAuth(): string {
   return `<main class="auth-layout">
-    <section class="auth-copy"><p class="eyebrow">Welcome back</p><h1>Sign in to manage market signals</h1><p>Use email for the full SaaS workspace. Telegram remains a quick account and delivery control surface.</p></section>
+    <section class="auth-copy"><p class="eyebrow">Welcome back</p><h1>Sign in to manage market research</h1><p>Use email for the full SaaS workspace. Telegram remains a quick account and delivery control surface. Market Signal AI provides informational analytics only, not investment advice.</p></section>
     <form class="panel auth-card">
       <label>Email<input type="email" placeholder="you@company.com" autocomplete="email"></label>
       <label>Password<input type="password" placeholder="Password" autocomplete="current-password"></label>
@@ -3445,7 +3450,7 @@ function renderAuth(): string {
 
 function renderOnboarding(): string {
   return `<main class="app-layout">${appSidebar("onboarding")}<section class="workspace">
-    <div class="page-heading compact"><p class="eyebrow">Onboarding</p><h1>Set up your signal workspace</h1></div>
+    <div class="page-heading compact"><p class="eyebrow">Onboarding</p><h1>Set up your market research workspace</h1></div>
     <div class="step-grid">
       ${step("1", "Choose markets", "Pick read-only country and language channels.")}
       ${step("2", "Connect Telegram", "Join broadcasts and start the private bot if your plan allows it.")}
@@ -3461,7 +3466,7 @@ function renderOnboarding(): string {
 
 function renderDashboard(): string {
   return `<main class="app-layout">${appSidebar("dashboard")}<section class="workspace">
-    <div class="workspace-head"><div><p class="eyebrow">Dashboard</p><h1>Today's market signal board</h1></div><a class="primary-action" href="/ticker">Analyze ticker privately</a></div>
+    <div class="workspace-head"><div><p class="eyebrow">Dashboard</p><h1>Today's market research board</h1><p>Informational analytics only. Not investment advice or a buy/sell/hold recommendation.</p></div><a class="primary-action" href="/ticker">Analyze ticker privately</a></div>
     <section class="metrics product-metrics">
       ${metricCard("Read-only feeds", "2", "Israel, US")}
       ${metricCard("Reports generated", "128", "+18 this week")}
@@ -3469,8 +3474,8 @@ function renderDashboard(): string {
       ${metricCard("Telegram users", "341", "active subscribers")}
     </section>
     <section class="dashboard-grid">
-      <div class="panel"><h2>Broadcast queue</h2>${signalRows()}</div>
-      <div class="panel"><h2>News heat</h2><div class="heat-list"><span style="width:88%">AI infrastructure</span><span style="width:64%">Central banks</span><span style="width:52%">Energy policy</span></div></div>
+      <div class="panel"><h2>Read-only news channels</h2><p class="legal-note">Channel posts are visible to channel subscribers. Do not send private ticker requests in country channels.</p>${signalRows()}</div>
+      <div class="panel"><h2>Private analysis quota</h2><p class="score">42 requests left</p><p class="legal-note">Private ticker analysis is delivered only through your account, API, or private bot. It is still informational only.</p><a class="primary-action inline-action" href="/ticker">Analyze privately</a></div>
     </section>
   </section></main>`;
 }
@@ -3492,8 +3497,12 @@ function renderApiAccess(): string {
     <div class="workspace-head"><div><p class="eyebrow">API access</p><h1>Production API key</h1></div><button type="button">Rotate key</button></div>
     <section class="panel api-panel">
       <label>API key<input readonly value="ms_live_**********************"></label>
-      <pre>GET /api/internal/access?telegramUserId=42&country=IL&language=he
-Authorization: Bearer &lt;INTERNAL_API_SECRET&gt;</pre>
+      <p class="legal-note">User API keys are for approved plan features only. Internal service routes use backend HMAC signing and must never be called from browser code.</p>
+      <pre>POST /api/analysis/requests
+Authorization: Bearer msk_live_&lt;user_api_key&gt;
+Content-Type: application/json
+
+{"ticker":"NVDA","reportType":"regular"}</pre>
     </section>
     <section class="metrics product-metrics">${metricCard("Rate limit", "120/min", "per workspace")}${metricCard("Webhook status", "Healthy", "signed payloads")}${metricCard("Last call", "2m ago", "200 OK")}</section>
   </section></main>`;
@@ -3502,9 +3511,9 @@ Authorization: Bearer &lt;INTERNAL_API_SECRET&gt;</pre>
 function renderTickerAnalysis(): string {
   return `<main class="app-layout">${appSidebar("ticker")}<section class="workspace">
     <div class="workspace-head"><div><p class="eyebrow">Private ticker analysis</p><h1>Analyze a ticker privately with news context</h1><p>Results are delivered only to your account, API integration, or private Telegram bot. They are not posted to country channels.</p></div></div>
-    <section class="panel ticker-search"><input value="NVDA"><button type="button">Run analysis</button></section>
+    <section class="panel ticker-search"><p class="legal-note">Ticker analysis is not a buy, sell, or hold recommendation. Verify independently before acting.</p><input value="NVDA"><button type="button">Run analysis</button></section>
     <section class="analysis-grid">
-      <div class="panel"><h2>Signal summary</h2><p class="score">Bullish 85</p><p>Strong news momentum, elevated valuation risk, and positive supplier sentiment.</p></div>
+      <div class="panel"><h2>Informational summary</h2><p class="score">Positive momentum context</p><p>News momentum, valuation risk, and supplier sentiment are summarized for research only.</p></div>
       <div class="panel"><h2>Drivers</h2><ul><li>AI infrastructure demand remains the core narrative.</li><li>Options activity implies higher short-term volatility.</li><li>Macro rate sensitivity is the main risk factor.</li></ul></div>
     </section>
   </section></main>`;
@@ -3512,7 +3521,7 @@ function renderTickerAnalysis(): string {
 
 function renderReports(): string {
   return `<main class="app-layout">${appSidebar("reports")}<section class="workspace">
-    <div class="page-heading compact"><p class="eyebrow">Report history</p><h1>Generated research archive</h1></div>
+    <div class="page-heading compact"><p class="eyebrow">Report history</p><h1>Generated research archive</h1><p>Reports are informational only and are not personalized investment advice.</p></div>
     <section class="panel table-card"><table><thead><tr><th>Report</th><th>Market</th><th>Status</th><th>Created</th></tr></thead><tbody>
       <tr><td>NVDA momentum digest</td><td>US</td><td>Ready</td><td>Today 09:40</td></tr>
       <tr><td>Banking policy watch</td><td>IL</td><td>Ready</td><td>Yesterday 18:05</td></tr>
@@ -3523,10 +3532,10 @@ function renderReports(): string {
 
 function renderBilling(): string {
   return `<main class="app-layout">${appSidebar("billing")}<section class="workspace">
-    <div class="page-heading compact"><p class="eyebrow">Billing</p><h1>Subscription and invoices</h1></div>
+    <div class="page-heading compact"><p class="eyebrow">Billing</p><h1>Subscription and invoices</h1><p>Paid access controls product features only. It does not include investment advice or guaranteed outcomes.</p></div>
     <section class="billing-grid">
-      <div class="panel"><h2>Current plan</h2><p class="price-line">Pro - $79/mo</p><p>Renews on July 15, 2026.</p><button type="button">Manage plan</button></div>
-      <div class="panel"><h2>Payment method</h2><p>Visa ending 4242</p><button type="button">Update card</button></div>
+      <div class="panel"><h2>Current plan</h2><p class="price-line">Pro - $79/mo</p><p>Renews on July 15, 2026 unless canceled before renewal.</p><p class="legal-note">Cancellation stops future renewals. Current paid access may remain active until the end of the billing period.</p><button type="button">Open billing portal</button></div>
+      <div class="panel"><h2>Payment method</h2><p>Billing, invoices, receipts, cancellation, and payment method updates are handled by the approved Merchant of Record portal.</p><button type="button">Manage payment</button></div>
     </section>
   </section></main>`;
 }
@@ -3587,15 +3596,20 @@ function renderTelegramApp(env: Env): string {
       <span class="mark">MS</span>
       <div>
         <h1>${escapeHtml(env.PUBLIC_APP_NAME)}</h1>
-        <p>Account, subscription and market bot access</p>
+        <p>Quick Telegram account entry for read-only channels and private analysis status</p>
       </div>
+    </section>
+    <section class="notice-panel">
+      <strong>Telegram is a quick entry, not the full product.</strong>
+      <p>Country channels are read-only broadcasts. Private ticker analysis is handled only in your private bot chat, website account, or API, subject to plan and quota.</p>
+      <p>Informational market research only. Not investment advice.</p>
     </section>
     <form id="profileForm" class="panel">
       <label>Name<input name="displayName" autocomplete="name" placeholder="Your name"></label>
       <label>Email<input name="email" type="email" autocomplete="email" placeholder="you@example.com"></label>
       <label>Language<select name="language" id="language"></select></label>
       <fieldset>
-        <legend>News countries</legend>
+        <legend>Read-only news countries</legend>
         <div id="countries" class="check-grid"></div>
       </fieldset>
       <button type="submit">Create account</button>
@@ -3707,6 +3721,12 @@ p { margin: 4px 0 0; color: #607077; }
 body.dark p { color: #9fb0b8; }
 .panel, .result { background: #fff; border: 1px solid #dfe7e9; border-radius: 8px; padding: 18px; box-shadow: 0 10px 30px rgba(20, 60, 60, 0.08); }
 body.dark .panel, body.dark .result { background: #17232d; border-color: #2b3b45; box-shadow: none; }
+.notice-panel { margin-bottom: 14px; border: 1px solid #b9ded6; border-radius: 8px; padding: 14px; background: #ecfdf5; }
+.notice-panel strong { color: #115e59; }
+.notice-panel p { color: #31544f; }
+body.dark .notice-panel { border-color: #0f766e; background: #0f2f2c; }
+body.dark .notice-panel strong { color: #99f6e4; }
+body.dark .notice-panel p { color: #c7dad5; }
 form { display: grid; gap: 14px; }
 label { display: grid; gap: 6px; font-size: 13px; font-weight: 700; color: #34474f; }
 body.dark label, body.dark legend { color: #d7e3e7; }
@@ -3836,6 +3856,10 @@ function saasCss(): string {
 .plan-card.highlighted { border-color: #0f766e; box-shadow: 0 20px 70px rgba(15, 118, 110, 0.18); }
 .plan-price, .price-line { margin: 0; color: #101817; font-size: 34px; font-weight: 950; }
 .plan-card ul { margin: 0; padding-left: 18px; color: #4f6360; line-height: 1.8; }
+.legal-strip { border: 1px solid #b9ded6; border-radius: 8px; padding: 16px; background: #eefaf6; }
+.legal-strip strong { color: #0f766e; }
+.consent-line { display: flex; align-items: flex-start; gap: 10px; margin-top: 12px; font-weight: 800; }
+.consent-line input { width: 18px; min-height: 18px; margin-top: 1px; }
 .auth-layout { width: min(1000px, calc(100% - 48px)); min-height: calc(100vh - 72px); margin: 0 auto; display: grid; grid-template-columns: 1fr 390px; gap: 38px; align-items: center; }
 .auth-card { display: grid; gap: 16px; }
 .auth-card a { color: #0f766e; font-weight: 900; }
@@ -3850,6 +3874,7 @@ function saasCss(): string {
 .product-metrics { margin-bottom: 0; }
 .product-metrics .metric p { margin-top: 8px; font-size: 13px; }
 .dashboard-grid, .analysis-grid, .billing-grid { grid-template-columns: minmax(0, 1.15fr) minmax(300px, 0.85fr); }
+.legal-note { color: #4f6360; line-height: 1.5; }
 .signal-row { min-height: 48px; border-bottom: 1px solid #e7edef; }
 .signal-row strong { color: #0f766e; }
 .heat-list { display: grid; gap: 12px; }
@@ -3863,6 +3888,7 @@ function saasCss(): string {
 .api-panel { display: grid; gap: 16px; }
 pre { margin: 0; overflow-x: auto; border-radius: 8px; padding: 16px; background: #111d1b; color: #dffcf4; font-size: 13px; line-height: 1.6; }
 .ticker-search { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; }
+.ticker-search .legal-note { grid-column: 1 / -1; margin: 0; }
 .score { color: #0f766e; font-size: 38px; font-weight: 950; }
 .table-card table { min-width: 640px; }
 @media (max-width: 960px) {
