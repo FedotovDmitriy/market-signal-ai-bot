@@ -32,6 +32,7 @@ This folder is the working knowledge base for Market Signal AI.
 - [Production Checklist](./production-checklist.md) - go/no-go checklist before a production launch or major release.
 - [Production Readiness Checklist v1.0](./production-readiness-checklist-v1.0.md) - current production gate checklist with specialist assignments for migrations, backup, HMAC keys, Paddle, Telegram production routes, domain, rollback, security, and QA approval.
 - [Main Manager Production Decision Tasks](./main-manager-production-decision-tasks.md) - staged production decisions required from the main manager, with explanations and blockers for inactive production and paid launch.
+- [Service Status Report 2026-07-17](./service-status-report-2026-07-17.md) - detailed current report for `market-signal-ai-bot`, including service purpose, team, completed work, status, blockers, next steps, and file inventory.
 - [Cloudflare Release And Rollback Runbook](./runbooks/cloudflare-release-and-rollback.md) - environment split, production 404 finding, HMAC rotation, D1 backup, deployment order, and rollback procedure.
 
 ## Legal And Compliance
